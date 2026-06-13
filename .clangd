@@ -1,0 +1,20 @@
+If:
+  PathMatch: .*\.cu(h)?$
+
+CompileFlags:
+  Compiler: /usr/bin/g++
+  Add:
+    - -xcuda
+  # Remove nvcc-specific arguments that clangd doesn't understand
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - --options-file*
+    - --generate-code*
+    - --expt-relaxed-constexpr
+    - -Xcompiler*
+    - -MD
+    - -MT
+    - -MF
+    - -ccbin=*
+    - -arch=native
+
