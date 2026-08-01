@@ -1,7 +1,10 @@
+#include <limits>
+
 #include "zproj/crs/wgs84.hpp"
+#include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/cuda/Exception.h"
 #include "ztensor/zt/cuda/Stream.h"
-#include "ztensor/zt/Tensor.h"
+#include "ztensor/zt/utility/Log.h"
 
 namespace {
 
@@ -21,6 +24,14 @@ namespace zproj::crs {
 
 void wgs84_to_ecef_cuda(const zt::Tensor& in, zt::Tensor& dst) {
     int64_t num = in.size(0);
+
+    // The kernel indexes points with unsigned int; reject counts that would
+    // truncate on the static_cast below (~4B points is unreachable in
+    // practice, but make the limit explicit rather than silent).
+    ZT_CHECK(num <= static_cast<int64_t>(std::numeric_limits<unsigned int>::max()),
+             "wgs84_to_ecef_cuda: point count {} exceeds the kernel's "
+             "unsigned-int index range",
+             num);
 
     int64_t grid_size = (num + 255) / 256;
 
