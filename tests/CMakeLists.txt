@@ -1,3 +1,6 @@
 add_executable(test_wgs84_to_ecef test_wgs84_to_ecef.cpp)
 target_link_libraries(test_wgs84_to_ecef PRIVATE zproj)
 add_test(NAME zproj.wgs84_to_ecef COMMAND test_wgs84_to_ecef)
+add_executable(test_ztensor test_ztensor.cpp)
+target_link_libraries(test_ztensor PRIVATE zt::ztensor CUDA::cudart)
+add_test(NAME zproj.ztensor COMMAND test_ztensor)

@@ -7,3 +7,7 @@ target_link_libraries(eigen_gpu PRIVATE Eigen3::Eigen CUDA::cudart)
 # A CUDA-only executable links with the C compiler by default and would miss
 # libstdc++; link it with the C++ host compiler instead.
 set_property(TARGET eigen_gpu PROPERTY LINKER_LANGUAGE CXX)
+
+# Vendored ztensor (third_party/ztensor): CPU + CUDA tensor-ops smoke.
+add_executable(ztensor_basic ztensor_basic/main.cpp)
+target_link_libraries(ztensor_basic PRIVATE zt::ztensor CUDA::cudart)

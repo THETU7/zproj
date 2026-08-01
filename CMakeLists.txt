@@ -90,6 +90,39 @@ include(cmake/warnings.cmake)
 zproj_enable_warnings(zproj)
 
 # ---------------------------------------------------------------------------
+# ztensor (vendored upstream -- llama.cpp-style ggml integration).
+#
+# The upstream ztensor source is tracked directly in third_party/ztensor so it
+# can be edited in place and rebuilt here. Push local edits back to the
+# upstream checkout with scripts/push-ztensor.sh, and refresh the vendored
+# copy from upstream with scripts/sync-ztensor.sh.
+# ---------------------------------------------------------------------------
+option(ZPROJ_ZTENSOR      "Build the vendored ztensor (third_party/ztensor)" ON)
+option(ZPROJ_ZTENSOR_CUDA "Build the vendored ztensor's CUDA backend"        ON)
+
+set(ZPROJ_ZTENSOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ztensor")
+if(ZPROJ_ZTENSOR)
+    if(NOT EXISTS "${ZPROJ_ZTENSOR_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "Vendored ztensor not found at '${ZPROJ_ZTENSOR_DIR}'.\n"
+            "Restore it with:\n"
+            "    ./scripts/sync-ztensor.sh")
+    endif()
+
+    # Override ztensor's option defaults the same way llama.cpp drives ggml:
+    # the vendored tree keeps upstream-compatible options, and zproj picks the
+    # defaults that make sense when embedding it (CUDA on, no standalone
+    # examples/tests/python, warnings-as-errors following ZPROJ_*).
+    set(BUILD_CUDA_MODULE_DEFAULT    ${ZPROJ_ZTENSOR_CUDA})
+    set(BUILD_TESTS_DEFAULT          OFF)
+    set(BUILD_EXAMPLES_DEFAULT       OFF)
+    set(BUILD_PYTHON_MODULE_DEFAULT  OFF)
+    set(ZT_WARNINGS_AS_ERRORS_DEFAULT ${ZPROJ_WARNINGS_AS_ERRORS})
+
+    add_subdirectory(${ZPROJ_ZTENSOR_DIR})
+endif()
+
+# ---------------------------------------------------------------------------
 # Subdirectories
 # ---------------------------------------------------------------------------
 if(ZPROJ_BUILD_EXAMPLES)
