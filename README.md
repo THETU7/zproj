@@ -5,37 +5,36 @@ idea is to rewrite common [PROJ](https://proj.org/)/[GDAL](https://gdal.org/)
 coordinate operations (e.g. WGS84 geodetic → ECEF) on the GPU and compare them
 against the GDAL/PROJ reference.
 
-Toolchain: **C++20 · CMake · GDAL (wraps PROJ) · CUDA · Eigen (vendored) · ztensor (vendored)**.
+Toolchain: **C++20 · CMake · GDAL (wraps PROJ) · CUDA · Eigen (system) ·
+ztensor (vendored)**.
 
 ## Build
 
-GDAL, PROJ, CUDA (nvcc), **spdlog**, and a recent GCC are expected on the
-system (spdlog is required by the vendored ztensor).
+GDAL, PROJ, CUDA (nvcc), **spdlog**, a recent GCC, and system Eigen are
+expected on the system (spdlog is required by the vendored ztensor).
 The CMake preset pins **g++-15** as both the host C++ compiler and the nvcc
 host compiler (CUDA 13.2 does not yet accept GCC 16), and lets CMake
 auto-detect the local GPU architecture (`native`).
 
 ```bash
-# one-time: fetch the vendored Eigen submodule (latest, for GPU/Tensor modules)
-git submodule update --init --recursive
-
 cmake --preset default
 cmake --build --preset default
 ctest --preset default                 # unit tests
 ./build/default/bin/wgs84_to_ecef      # GDAL-vs-CUDA comparison + timing
-./build/default/bin/eigen_gpu          # Eigen GPU/Tensor modules sanity check
 ./build/default/bin/ztensor_basic      # vendored ztensor (CPU + CUDA) smoke
 ```
 
-Debug build: `cmake --preset debug && cmake --build --preset debug`.
+CUDA-dependent tests/examples skip gracefully when no CUDA-capable device is
+present (e.g. `zproj.ztensor`). Debug build:
+`cmake --preset debug && cmake --build --preset debug`.
 
 ## Layout
 
 ```
 zproj/
-├── CMakeLists.txt          # C++20 + CUDA, GDAL, vendored Eigen
+├── CMakeLists.txt          # C++20 + CUDA, GDAL, system Eigen, vendored ztensor
 ├── CMakePresets.json        # g++-15 / nvcc, native GPU arch
-├── third_party/eigen/       # git submodule (latest Eigen, GPU/Tensor modules)
+├── AGENTS.md                # code style & constraints (adopted from ztensor)
 ├── third_party/ztensor/      # vendored ztensor source (editable in-tree)
 ├── scripts/                   # ztensor <-> zproj sync helpers
 │   ├── push-ztensor.sh        #   vendored changes -> upstream ztensor checkout
@@ -47,8 +46,8 @@ zproj/
 │   └── zproj/cuda/          #   private CUDA helpers (error checking)
 ├── examples/                # runnable demos
 │   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernel + timing
-│   ├── eigen_gpu/           #   validates Eigen's GPU Core + Tensor modules (.cu)
-│   └── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
+│   ├── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
+│   └── eigen_gpu/            #   DISABLED (needed vendored-master Eigen GPU/Tensor)
 └── tests/                   # analytic smoke tests (CTest)
 ```
 
@@ -59,8 +58,16 @@ zproj/
 - **Fast path** is a CUDA kernel. The geodetic → ECEF math is identical on host
   and device (see `ZPROJ_HD` in `wgs84.hpp`), so the CPU reference and the GPU
   kernel cannot drift apart.
-- **Eigen** is vendored as a submodule (never the system copy) so the latest
-  GPU/Tensor modules are available for more advanced acceleration work.
+- **Eigen** (system install) is used only for plain host-side math (error
+  norms, etc.). GPU/tensor acceleration is provided by the vendored ztensor
+  instead — see the ztensor section below.
+
+## Code style & constraints (from ztensor)
+
+zproj adopts ztensor's conventions: same `.clang-format` (Google, 4-space,
+80-col) and `.clang-tidy`, `-Wall -Wextra -Werror` by default, grouped
+includes, conventional commits, and a performance-first rule. See
+[`AGENTS.md`](AGENTS.md).
 
 ## Vendored ztensor (llama.cpp-style ggml integration)
 
@@ -91,8 +98,9 @@ third_party/ztensor)` it overrides ztensor's option defaults —
 The vendored copy also carries a few small, upstream-friendly CMake patches
 that make ztensor behave correctly when embedded as a subdirectory
 (`PROJECT_SOURCE_DIR` instead of `CMAKE_SOURCE_DIR`, reuse an existing
-`Eigen3::Eigen` target, overridable option defaults). They are synced back to
-ztensor via `push-ztensor.sh`, so upstream and the vendored copy converge.
+`Eigen3::Eigen` target — the system one here, overridable option defaults).
+They are synced back to ztensor via `push-ztensor.sh`, so upstream and the
+vendored copy converge.
 
 ### Editing ztensor code here
 
@@ -116,11 +124,16 @@ last synced from.
 ## Status
 
 Skeleton + first transform (`wgs84 → ecef`), with the GDAL reference path and a
-CUDA kernel that agree to ~1e-8 m. Eigen's GPU Core and Tensor modules are
-verified to compile and run in this toolchain (`examples/eigen_gpu`).
+CUDA kernel that agree to ~1e-8 m. The vendored ztensor builds with its CUDA
+backend and is exercised by `examples/ztensor_basic` + `tests/test_ztensor`.
+
+The former Eigen GPU/Tensor demo (`examples/eigen_gpu`) is commented out:
+it required the vendored master Eigen, which has been removed in favor of the
+system Eigen. Its functionality is planned to be reimplemented on top of
+ztensor (CUDA tensors).
 
 The convenience `wgs84_to_ecef()` wrapper currently shows ~1× vs the CPU
 reference because the single launch is dominated by `cudaMalloc` + H2D/D2H
 copies + synchronization, not the kernel itself — the natural next step is to
-keep device buffers resident across batches (or port the kernel to
-`Eigen::Tensor` + `GpuDevice`) to amortize that overhead.
+keep device buffers resident across batches (or port the kernel to ztensor
+CUDA tensors) to amortize that overhead.

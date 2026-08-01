@@ -19,8 +19,7 @@
 #include <cuda_runtime.h>
 #endif
 
-int main()
-{
+int main() {
     zt::Logger::Init();
 
     // ---- CPU: ztensor's canonical acceptance check ----
@@ -40,7 +39,8 @@ int main()
         return 0;
     }
 
-    const auto a = zt::arange(0.0, 6.0, 1.0, zt::dtype(zt::kFloat)).reshape({2, 3});
+    const auto a =
+        zt::arange(0.0, 6.0, 1.0, zt::dtype(zt::kFloat)).reshape({2, 3});
     const auto b = zt::full({2, 3}, zt::Scalar(10.0f), zt::dtype(zt::kFloat));
 
     const auto g = a.cuda();
@@ -52,7 +52,10 @@ int main()
     const auto* p = r.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         ZT_CHECK(p[i] == static_cast<float>(i) + 10.0f,
-                 "mismatch at [{}]: {} != {}", i, p[i], i + 10);
+                 "mismatch at [{}]: {} != {}",
+                 i,
+                 p[i],
+                 i + 10);
     }
     std::cout << "CUDA a + 10 = [" << p[0] << ", ..., " << p[5] << "]\n";
     std::cout << "ztensor integration OK (CPU + CUDA)\n";

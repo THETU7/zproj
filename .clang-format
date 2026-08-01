@@ -1,24 +1,65 @@
----
+# zproj clang-format config (adopted from ztensor: Google style, 4-space indent)
 BasedOnStyle: Google
-AlignAfterOpenBracket: 'AlwaysBreak'
-AllowAllConstructorInitializersOnNextLine: 'false'
-AllowAllParametersOfDeclarationOnNextLine: 'false'
-AlignConsecutiveMacros: 'true'
-AllowShortCaseLabelsOnASingleLine: 'true'
-AllowShortFunctionsOnASingleLine: 'None'
-AllowShortIfStatementsOnASingleLine: 'Never'
-AllowShortLoopsOnASingleLine: 'false'
-BreakBeforeBraces: Allman
-BinPackArguments: 'false'
-BinPackParameters: 'false'
-Cpp11BracedListStyle: 'false'
-ColumnLimit: 125 
-NamespaceIndentation: All
-SpaceAfterTemplateKeyword: 'false'
-SpaceBeforeCtorInitializerColon: 'true'
-SpaceBeforeInheritanceColon: 'true'
-SpaceBeforeParens: ControlStatements
-SpaceBeforeRangeBasedForLoopColon: 'true'
-SpaceInEmptyBlock: true
-Standard: 'Latest'
-...
+Language: Cpp
+Standard: c++20
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+
+# Line length
+ColumnLimit: 80
+ReflowComments: true
+
+# Pointers / references
+DerivePointerAlignment: false
+PointerAlignment: Left
+DeriveLineEnding: false
+LineEnding: DeriveLF
+
+# Braces
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+AlwaysBreakTemplateDeclarations: Yes
+
+# Arguments
+AlignAfterOpenBracket: Align
+BinPackArguments: false
+BinPackParameters: false
+AllowAllParametersOfDeclarationOnNextLine: true
+
+# Includes
+IncludeBlocks: Regroup
+IncludeCategories:
+  # C system headers (incl. CUDA runtime, GDAL)
+  - Regex: '^<[^/]+\.h>$'
+    Priority: 1
+  # C++ standard headers
+  - Regex: '^<[^/]+>$'
+    Priority: 2
+  # Other libraries (Eigen, spdlog/fmt)
+  - Regex: '^<Eigen/.*>'
+    Priority: 3
+  - Regex: '^<(spdlog|fmt)/.*>'
+    Priority: 3
+  # zproj public headers
+  - Regex: '^"zproj/.*"'
+    Priority: 4
+  # vendored ztensor public headers
+  - Regex: '^"ztensor/.*"'
+    Priority: 4
+  # private headers
+  - Regex: '^".*"$'
+    Priority: 5
+SortIncludes: CaseInsensitive
+
+# Misc
+CompactNamespaces: false
+FixNamespaceComments: true
+NamespaceIndentation: None
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: false
+SpacesBeforeTrailingComments: 2

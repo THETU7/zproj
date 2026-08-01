@@ -1,4 +1,15 @@
-// Demonstration that Eigen's GPU path works in this toolchain
+// examples/eigen_gpu/eigen_gpu_demo.cu
+//
+// DISABLED. This demo validated Eigen's GPU Core + Tensor modules, which
+// required the vendored master Eigen (third_party/eigen, now removed). The
+// system Eigen has no GPU/Tensor backend, so the demo is commented out.
+//
+// Reimplementation plan: replace it with a ztensor-based GPU demo
+// (zt::Tensor on CUDA devices); see examples/ztensor_basic/main.cpp and
+// tests/test_ztensor.cpp for the ztensor usage pattern.
+//
+// Original source, kept for reference:
+/*// Demonstration that Eigen's GPU path works in this toolchain
 // (Eigen master + CUDA 13.2 + g++-15 host + C++20), validating the reason we
 // vendor Eigen as a submodule rather than using the system copy.
 //
@@ -26,8 +37,8 @@ void check_cuda(cudaError_t e, const char* file, int line)
 {
     if (e != cudaSuccess)
     {
-        std::fprintf(stderr, "CUDA error at %s:%d: %s\n", file, line, cudaGetErrorString(e));
-        std::exit(EXIT_FAILURE);
+        std::fprintf(stderr, "CUDA error at %s:%d: %s\n", file, line,
+cudaGetErrorString(e)); std::exit(EXIT_FAILURE);
     }
 }
 #define CK(e) check_cuda((e), __FILE__, __LINE__)
@@ -37,7 +48,8 @@ __global__ void eigen_vec_kernel(const double* in, double* out)
 {
     const Eigen::Map<const Eigen::Vector3d> v(in);
     Eigen::Map<Eigen::Vector3d> r(out);
-    r = 2.0 * v + Eigen::Vector3d(1.0, 1.0, 1.0);  // expect 2*[1,2,3]+1 = [3,5,7]
+    r = 2.0 * v + Eigen::Vector3d(1.0, 1.0, 1.0);  // expect 2*[1,2,3]+1 =
+[3,5,7]
 }
 
 int run_eigen_vec()
@@ -57,8 +69,8 @@ int run_eigen_vec()
     cudaFree(d_in);
     cudaFree(d_out);
 
-    const bool ok = host_out[0] == 3.0 && host_out[1] == 5.0 && host_out[2] == 7.0;
-    std::printf("[A] Eigen Vector3d on device: [%.1f, %.1f, %.1f] -> %s\n",
+    const bool ok = host_out[0] == 3.0 && host_out[1] == 5.0 && host_out[2]
+== 7.0; std::printf("[A] Eigen Vector3d on device: [%.1f, %.1f, %.1f] -> %s\n",
                 host_out[0], host_out[1], host_out[2], ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
@@ -92,8 +104,8 @@ int run_eigen_tensor()
     cudaFree(d_out);
 
     const bool ok = h_out[0] == 3.0f && h_out[n - 1] == 3.0f;
-    std::printf("[B] Eigen Tensor + GpuDevice elementwise (n=%d): %.1f .. %.1f -> %s\n",
-                n, h_out[0], h_out[n - 1], ok ? "OK" : "FAIL");
+    std::printf("[B] Eigen Tensor + GpuDevice elementwise (n=%d): %.1f .. %.1f
+-> %s\n", n, h_out[0], h_out[n - 1], ok ? "OK" : "FAIL");
 
     std::free(h_in);
     std::free(h_out);
@@ -113,3 +125,4 @@ int main()
     }
     return rc;
 }
+*/

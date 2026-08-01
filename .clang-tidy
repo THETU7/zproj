@@ -1,6 +1,23 @@
-# ---
-# Checks: '*,-fuchsia-*,-google-*,-zircon-*,-abseil-*,-modernize-use-trailing-return-type,-llvm-*,-llvmlibc-*'
-# CheckOptions: [{ key: misc-non-private-member-variables-in-classes, value: IgnoreClassesWithAllMemberVariablesBeingPublic }]
-# WarningsAsErrors: '*'
-# HeaderFilterRegex: ''
-# FormatStyle: none
+---
+# zproj clang-tidy config (adopted from ztensor)
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-named-parameter,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/(zproj|ztensor)/.*'
+FormatStyle: file
+CheckOptions:
+  - key:   readability-braces-around-statements.ShortStatementOnSameLine
+    value: 'false'
+  - key:   modernize-use-default-member-init.UseAssignment
+    value: '1'

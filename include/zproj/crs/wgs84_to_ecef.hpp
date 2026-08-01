@@ -5,10 +5,10 @@
 // CUDA headers or being compiled by nvcc.
 #pragma once
 
-#include "zproj/crs/wgs84.hpp"
-
 #include <cstddef>
 #include <vector>
+
+#include "zproj/crs/wgs84.hpp"
 
 namespace zproj::crs {
 

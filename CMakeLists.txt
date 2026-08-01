@@ -11,7 +11,8 @@ project(zproj
 # ---------------------------------------------------------------------------
 option(ZPROJ_BUILD_EXAMPLES "Build zproj examples" ON)
 option(ZPROJ_BUILD_TESTS "Build zproj tests" ON)
-option(ZPROJ_WARNINGS_AS_ERRORS "Treat host compiler warnings as errors" OFF)
+option(ZPROJ_WARNINGS_AS_ERRORS "Treat host compiler warnings as errors" ON)
+option(ZPROJ_ENABLE_SANITIZER  "Enable Address/UndefinedBehaviorSanitizer (GCC/Clang)" OFF)
 
 # ---------------------------------------------------------------------------
 # Standards. CUDA host compiler / architecture are resolved through the
@@ -36,23 +37,13 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 # ---------------------------------------------------------------------------
-# Eigen (vendored submodule — never the system copy). The submodule gives us
-# the latest Eigen, whose GPU/Tensor modules we rely on for acceleration.
-# We expose it as a header-only INTERFACE target aliased to Eigen3::Eigen so
-# downstream code can use it the same way as a system Eigen would be found.
+# Eigen (system install). The vendored master Eigen was removed: the parts of
+# zproj that needed its GPU/Tensor modules are commented out (see
+# examples/eigen_gpu) and will be reimplemented on top of the vendored
+# ztensor instead.
 # ---------------------------------------------------------------------------
-set(ZPROJ_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen")
-if(NOT EXISTS "${ZPROJ_EIGEN_DIR}/Eigen/Core")
-    message(FATAL_ERROR
-        "Eigen submodule not found at '${ZPROJ_EIGEN_DIR}'.\n"
-        "Fetch it with:\n"
-        "    git submodule update --init --recursive")
-endif()
+find_package(Eigen3 CONFIG REQUIRED)
 
-add_library(zproj_eigen INTERFACE)
-add_library(Eigen3::Eigen ALIAS zproj_eigen)
-target_include_directories(zproj_eigen SYSTEM INTERFACE "${ZPROJ_EIGEN_DIR}")
-target_compile_definitions(zproj_eigen INTERFACE EIGEN_MPL2_ONLY)
 
 # ---------------------------------------------------------------------------
 # GDAL (wraps PROJ; used for the CPU reference / ground-truth transforms).

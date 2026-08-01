@@ -18,8 +18,7 @@
 #include <cuda_runtime.h>
 #endif
 
-int main()
-{
+int main() {
     zt::Logger::Init();
 
     // ---- CPU acceptance: ones(4,4) + ones(4,4), summed == 32 ----
@@ -32,8 +31,8 @@ int main()
 
     // ---- CPU reductions / arithmetic ----
     {
-        const auto r = zt::arange(0.0, 6.0, 1.0, zt::dtype(zt::kFloat))
-                           .reshape({2, 3});
+        const auto r =
+            zt::arange(0.0, 6.0, 1.0, zt::dtype(zt::kFloat)).reshape({2, 3});
         ZT_CHECK(r.sum().item<float>() == 15.0f, "CPU arange sum mismatch");
     }
 
@@ -46,13 +45,14 @@ int main()
                            .cuda();
         ZT_CHECK(a.is_cuda(), "expected a CUDA tensor");
 
-        const auto r = (a + zt::full({2, 3}, zt::Scalar(1.0f),
-                                     zt::dtype(zt::kFloat)).cuda())
-                           .sum()
-                           .cpu();
+        const auto r =
+            (a +
+             zt::full({2, 3}, zt::Scalar(1.0f), zt::dtype(zt::kFloat)).cuda())
+                .sum()
+                .cpu();
         // 0+1 + 1+1 + ... + 5+1 = 21
-        ZT_CHECK(r.item<float>() == 21.0f,
-                 "CUDA sum mismatch: {}", r.item<float>());
+        ZT_CHECK(
+            r.item<float>() == 21.0f, "CUDA sum mismatch: {}", r.item<float>());
     } else {
         std::cout << "no CUDA-capable device found; CUDA checks skipped\n";
     }
