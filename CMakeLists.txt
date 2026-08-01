@@ -61,6 +61,10 @@ find_package(GDAL REQUIRED)
 # consumers (examples, tests) that never touch nvcc themselves.
 find_package(CUDAToolkit REQUIRED)
 
+# OpenMP backs the CPU wgs84_to_ecef loop. Linked only when available; the
+# loop degrades to serial otherwise (the source guards on _OPENMP).
+find_package(OpenMP QUIET)
+
 # ---------------------------------------------------------------------------
 # ztensor (vendored upstream -- llama.cpp-style ggml integration).
 #
@@ -118,6 +122,7 @@ target_link_libraries(zproj
         zt::ztensor
     PRIVATE
         GDAL::GDAL
+        $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 
 include(cmake/warnings.cmake)
