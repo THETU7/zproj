@@ -108,7 +108,8 @@ int main() {
     // std::cout << "zproj CUDA (GPU)    = " << cuda_ms
     //           << " ms  (incl. H2D/D2H + sync)\n";
     // if (cuda_ms > 0.0) {
-    //     std::cout << "speedup             = " << (gdal_ms / cuda_ms) << "x\n";
+    //     std::cout << "speedup             = " << (gdal_ms / cuda_ms) <<
+    //     "x\n";
     // }
 
     return 0;

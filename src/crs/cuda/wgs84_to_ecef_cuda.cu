@@ -1,7 +1,7 @@
 #include "zproj/crs/wgs84.hpp"
-#include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/cuda/Exception.h"
 #include "ztensor/zt/cuda/Stream.h"
+#include "ztensor/zt/Tensor.h"
 
 namespace {
 
@@ -30,7 +30,9 @@ void wgs84_to_ecef_cuda(const zt::Tensor& in, zt::Tensor& dst) {
 
     // Launch on the caller's current (thread-local) stream so this kernel
     // stays ordered with other ztensor CUDA work, and check the launch.
-    wgs84_to_ecef_kernel<<<static_cast<unsigned int>(grid_size), 256, 0,
+    wgs84_to_ecef_kernel<<<static_cast<unsigned int>(grid_size),
+                           256,
+                           0,
                            zt::cuda::GetStream()>>>(
         in_ptr, dst_ptr, static_cast<unsigned int>(num));
     ZT_CUDA_GET_LAST_ERROR("wgs84_to_ecef_kernel launch failed");
