@@ -17,7 +17,7 @@
 // Modeled on LichtFeld-Studio's CudaMemoryPool.
 //
 // This header is visible only when BUILD_CUDA_MODULE is enabled
-// (same guard discipline as CUDAUtils.h / CUDAEventPool.h).
+// (same guard discipline as the public zt/cuda/{Exception,Guard,Stream}.h).
 
 #pragma once
 
@@ -35,29 +35,30 @@
 
 namespace zt {
 
-// ── CudaMemoryPool ─────────────────────────────────────────────────────────────
+// ── CudaMemoryPool
+// ─────────────────────────────────────────────────────────────
 
 class CudaMemoryPool {
 public:
-    // ── Constants ──────────────────────────────────────────────────────────────
+    // ── Constants
+    // ──────────────────────────────────────────────────────────────
 
-    static constexpr size_t SLAB_ALLOC_THRESHOLD = 256 * 1024;            // 256 KiB
-    static constexpr size_t BUCKET_ALLOC_THRESHOLD = 16ULL * 1024ULL * 1024ULL * 1024ULL;  // 16 GiB
+    static constexpr size_t SLAB_ALLOC_THRESHOLD = 256 * 1024;  // 256 KiB
+    static constexpr size_t BUCKET_ALLOC_THRESHOLD =
+        16ULL * 1024ULL * 1024ULL * 1024ULL;  // 16 GiB
 
-    // ── Allocation method tag ──────────────────────────────────────────────────
+    // ── Allocation method tag
+    // ──────────────────────────────────────────────────
 
-    enum class AllocMethod : uint8_t {
-        Slab = 0,
-        Bucketed,
-        Async,
-        Direct
-    };
+    enum class AllocMethod : uint8_t { Slab = 0, Bucketed, Async, Direct };
 
-    // ── Singleton ──────────────────────────────────────────────────────────────
+    // ── Singleton
+    // ──────────────────────────────────────────────────────────────
 
     static CudaMemoryPool& instance();
 
-    // ── Lifecycle ──────────────────────────────────────────────────────────────
+    // ── Lifecycle
+    // ──────────────────────────────────────────────────────────────
 
     // Configure the driver memory pool (ReleaseThreshold = 64 MiB).
     // Called lazily on first allocate(); safe to call multiple times.
@@ -72,10 +73,12 @@ public:
         suspend_deallocations_.store(true, std::memory_order_release);
     }
 
-    // ── Primary interface ──────────────────────────────────────────────────────
+    // ── Primary interface
+    // ──────────────────────────────────────────────────────
 
-    // Allocate `bytes` of CUDA memory, ordered after all prior work on `stream`.
-    // Returns nullptr only when the driver truly cannot satisfy the request.
+    // Allocate `bytes` of CUDA memory, ordered after all prior work on
+    // `stream`. Returns nullptr only when the driver truly cannot satisfy the
+    // request.
     void* allocate(size_t bytes, cudaStream_t stream = nullptr);
 
     // Return memory previously obtained from allocate().  `stream` must be the
@@ -83,7 +86,8 @@ public:
     void deallocate(void* ptr, size_t bytes, cudaStream_t stream = nullptr);
     void deallocate(void* ptr, cudaStream_t stream = nullptr);
 
-    // ── Stream-crossing helpers ────────────────────────────────────────────────
+    // ── Stream-crossing helpers
+    // ────────────────────────────────────────────────
 
     // Mark `ptr` as used by `stream` in addition to its home stream.  On free,
     // the extra stream is bridged back to the home stream before recycling.
@@ -100,7 +104,8 @@ public:
     // that has touched pool memory.
     void release_stream(cudaStream_t stream);
 
-    // ── Maintenance ────────────────────────────────────────────────────────────
+    // ── Maintenance
+    // ────────────────────────────────────────────────────────────
 
     // Trim cached memory across all tiers and the driver pool.
     void trim();
@@ -110,7 +115,8 @@ public:
     // cache, and trim the driver pool to zero.
     void trim_cached_memory();
 
-    // ── Statistics ─────────────────────────────────────────────────────────────
+    // ── Statistics
+    // ─────────────────────────────────────────────────────────────
 
     struct Stats {
         std::atomic<uint64_t> slab_allocs{0};
@@ -130,7 +136,8 @@ public:
     std::string get_stats_string() const;
     void print_stats() const;
 
-    // ── Cache bypass ───────────────────────────────────────────────────────────
+    // ── Cache bypass
+    // ───────────────────────────────────────────────────────────
 
     // True when ZT_DISABLE_CUDA_CACHE=1 is set in the environment.
     static bool cache_disabled_by_env();
@@ -139,7 +146,8 @@ public:
     CudaMemoryPool& operator=(const CudaMemoryPool&) = delete;
 
 private:
-    // ── Internal structures ────────────────────────────────────────────────────
+    // ── Internal structures
+    // ────────────────────────────────────────────────────
 
     struct AllocationInfo {
         size_t size = 0;
@@ -148,12 +156,14 @@ private:
         std::vector<cudaStream_t> extra_streams;
     };
 
-    // ── Construction ───────────────────────────────────────────────────────────
+    // ── Construction
+    // ───────────────────────────────────────────────────────────
 
     CudaMemoryPool();
     ~CudaMemoryPool();
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
+    // ── Internal helpers
+    // ──────────────────────────────────────────────────────
 
     void track_allocation(void* ptr,
                           size_t size,
@@ -170,7 +180,8 @@ private:
     // Last-resort direct allocation with trim-and-retry.
     void* allocate_direct(size_t bytes);
 
-    // ── Data members ──────────────────────────────────────────────────────────
+    // ── Data members
+    // ──────────────────────────────────────────────────────────
 
     std::unordered_map<void*, AllocationInfo> allocation_map_;
     std::mutex map_mutex_;

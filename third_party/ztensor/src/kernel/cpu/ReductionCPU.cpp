@@ -23,29 +23,29 @@ namespace {
 
 // NaN detection helper: integral types are never NaN; floating-point types
 // use std::isnan; Half/BFloat16 convert to float for the check.
-template <typename T>
+template<typename T>
 constexpr bool is_nan(T /*v*/) {
     return false;
 }
-template <>
+template<>
 inline bool is_nan<float>(float v) {
     return std::isnan(v);
 }
-template <>
+template<>
 inline bool is_nan<double>(double v) {
     return std::isnan(v);
 }
-template <>
+template<>
 inline bool is_nan<Half>(Half v) {
     return std::isnan(static_cast<float>(v));
 }
-template <>
+template<>
 inline bool is_nan<BFloat16>(BFloat16 v) {
     return std::isnan(static_cast<float>(v));
 }
 
 // Identity element for `op`. Min/Max error on empty inputs at the call site.
-template <typename T>
+template<typename T>
 T identity_value(ReductionOpCode op) {
     switch (op) {
         case ReductionOpCode::Sum:
@@ -68,7 +68,7 @@ T identity_value(ReductionOpCode op) {
 }
 
 // Fold one source value `v` into the running accumulator `acc`.
-template <typename T>
+template<typename T>
 T combine_value(ReductionOpCode op, T acc, T v) {
     switch (op) {
         case ReductionOpCode::Sum:
@@ -81,10 +81,14 @@ T combine_value(ReductionOpCode op, T acc, T v) {
         case ReductionOpCode::Prod:
             return static_cast<T>(acc * v);
         case ReductionOpCode::NanMin:
-            if (is_nan(v)) { return acc; }
+            if (is_nan(v)) {
+                return acc;
+            }
             return v < acc ? v : acc;
         case ReductionOpCode::NanMax:
-            if (is_nan(v)) { return acc; }
+            if (is_nan(v)) {
+                return acc;
+            }
             return v > acc ? v : acc;
         case ReductionOpCode::All:
             return static_cast<T>(acc && v);

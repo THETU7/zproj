@@ -1,8 +1,8 @@
 // ztensor/zt/Macros.h
 //
-// Common compiler annotations shared across public headers. Mirrors the
-// CUDAUtils.h definition so public headers don't need to include private
-// implementation details.
+// Common compiler annotations shared across public and internal headers
+// (formerly defined in the internal CUDAUtils.h; now public so no header
+// needs to pull in private implementation details).
 
 #pragma once
 

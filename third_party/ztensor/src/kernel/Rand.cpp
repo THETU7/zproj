@@ -22,7 +22,9 @@ void Rand(const Tensor& dst, double from, double to, const Generator& gen) {
     ZT_LOG_ERROR("Rand: unsupported device {}", dst.device().string());
 }
 
-void RandN(const Tensor& dst, double mean, double stddev,
+void RandN(const Tensor& dst,
+           double mean,
+           double stddev,
            const Generator& gen) {
     if (dst.is_cpu()) {
         RandNCPU(dst, mean, stddev, gen);
@@ -37,7 +39,9 @@ void RandN(const Tensor& dst, double mean, double stddev,
     ZT_LOG_ERROR("RandN: unsupported device {}", dst.device().string());
 }
 
-void RandInt(const Tensor& dst, int64_t low, int64_t high,
+void RandInt(const Tensor& dst,
+             int64_t low,
+             int64_t high,
              const Generator& gen) {
     if (dst.is_cpu()) {
         RandIntCPU(dst, low, high, gen);

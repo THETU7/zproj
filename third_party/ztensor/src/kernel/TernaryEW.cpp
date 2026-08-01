@@ -23,12 +23,11 @@ void TernaryEW(const Tensor& cond,
         return;
     }
 #endif
-    ZT_LOG_ERROR(
-        "TernaryEW: unsupported device (cond {}, a {}, b {}, dst {})",
-        cond.device().string(),
-        a.device().string(),
-        b.device().string(),
-        dst.device().string());
+    ZT_LOG_ERROR("TernaryEW: unsupported device (cond {}, a {}, b {}, dst {})",
+                 cond.device().string(),
+                 a.device().string(),
+                 b.device().string(),
+                 dst.device().string());
 }
 
 }  // namespace zt::kernel

@@ -23,7 +23,7 @@ namespace zt::kernel {
 namespace {
 
 // Identity value for the best-value tracker (not written to dst).
-template <typename T>
+template<typename T>
 T identity_value(ArgReduceOp op) {
     switch (op) {
         case ArgReduceOp::ArgMin:
@@ -38,8 +38,7 @@ T identity_value(ArgReduceOp op) {
 // `indexer` is already in reduction mode (output stride 0 on reduced axes).
 // We decode coordinates from `wi` via primary strides, then only accumulate
 // over reduced dimensions (where output stride == 0).
-int64_t compute_reduced_flat_index(const core::Indexer& indexer,
-                                    int64_t wi) {
+int64_t compute_reduced_flat_index(const core::Indexer& indexer, int64_t wi) {
     const int64_t ndim = indexer.NumDims();
     int64_t coord = wi;
     int64_t flat_idx = 0;
@@ -69,12 +68,13 @@ void ArgReduceCPU(const Tensor& src,
         const int64_t nout = dst.numel();
 
         // Seed the index output with -1 (sentinel: not yet assigned).
-        auto* idx_out = static_cast<int64_t*>(const_cast<void*>(dst.data_ptr()));
+        auto* idx_out =
+            static_cast<int64_t*>(const_cast<void*>(dst.data_ptr()));
         std::fill_n(idx_out, static_cast<std::size_t>(nout), int64_t{-1});
 
         // Best-value tracker (one per output slot), seeded with identity.
         std::vector<scalar_t> best_val(static_cast<std::size_t>(nout),
-                                        identity_value<scalar_t>(op));
+                                       identity_value<scalar_t>(op));
 
         // Build Indexer in reduction mode.  INPUT_SAME is used because the
         // output dtype (Long) differs from the input dtype (scalar_t).
@@ -84,10 +84,8 @@ void ArgReduceCPU(const Tensor& src,
 
         for (int64_t i = 0; i < n; ++i) {
             const scalar_t v = *indexer.GetInputPtr<scalar_t>(0, i);
-            const int64_t out_off =
-                indexer.GetOutputPtr<int64_t>(i) - idx_out;
-            const int64_t flat_idx =
-                compute_reduced_flat_index(indexer, i);
+            const int64_t out_off = indexer.GetOutputPtr<int64_t>(i) - idx_out;
+            const int64_t flat_idx = compute_reduced_flat_index(indexer, i);
             bool better = false;
             const auto s = static_cast<std::size_t>(out_off);
             if (op == ArgReduceOp::ArgMin) {

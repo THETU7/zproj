@@ -105,8 +105,7 @@ ZT_HOST_DEVICE inline uint16_t float_to_bf16_bits(float f) {
     // Round to nearest even: the rounding_bias is 0x7FFF plus the LSB of
     // the truncated result (bit 16 of the float), which implements the
     // "round to nearest, ties to even" rule.
-    const uint32_t rounding_bias =
-        ((bits >> 16) & 1U) + UINT32_C(0x7FFF);
+    const uint32_t rounding_bias = ((bits >> 16) & 1U) + UINT32_C(0x7FFF);
     return static_cast<uint16_t>((bits + rounding_bias) >> 16);
 }
 
@@ -200,7 +199,7 @@ inline std::ostream& operator<<(std::ostream& out, BFloat16 value) {
 // ============================================================================
 namespace std {
 
-template <>
+template<>
 class numeric_limits<zt::BFloat16> {
 public:
     static constexpr bool is_specialized = true;
@@ -212,13 +211,12 @@ public:
     static constexpr bool has_signaling_NaN = true;
     static constexpr std::float_denorm_style has_denorm = denorm_present;
     static constexpr bool has_denorm_loss = false;
-    static constexpr std::float_round_style round_style =
-        std::round_to_nearest;
+    static constexpr std::float_round_style round_style = std::round_to_nearest;
     static constexpr bool is_iec559 = false;  // BF16 is not IEEE 754
     static constexpr bool is_bounded = true;
     static constexpr bool is_modulo = false;
-    static constexpr int digits = 8;       // 7 mantissa + 1 implicit
-    static constexpr int digits10 = 2;     // floor(7 * log10(2))
+    static constexpr int digits = 8;    // 7 mantissa + 1 implicit
+    static constexpr int digits10 = 2;  // floor(7 * log10(2))
     static constexpr int max_digits10 = 4;
     static constexpr int radix = 2;
     static constexpr int min_exponent = -125;  // same as float32: 1 - 127 + 1

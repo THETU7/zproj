@@ -543,7 +543,7 @@ public:
 
     // Per-tensor stream operations.  cudaStream_t is only visible under
     // NVCC, so these are guarded with __CUDACC__ rather than
-    // BUILD_CUDA_MODULE (same discipline as CUDAUtils.h).
+    // BUILD_CUDA_MODULE (same guard discipline as the other CUDA headers).
 #ifdef __CUDACC__
     // Notify the memory pool that `*this`'s backing memory will be used on
     // `stream` in addition to its current home stream.  Must be called

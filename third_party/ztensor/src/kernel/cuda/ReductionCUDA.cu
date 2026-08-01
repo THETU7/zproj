@@ -18,9 +18,9 @@
 #include <cstdint>
 #include <limits>
 
+#include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"
@@ -168,8 +168,8 @@ __device__ inline void atomic_mul(double* addr, double v) {
         assumed = old;
         double cur = *reinterpret_cast<const double*>(&assumed);
         double desired = cur * v;
-        old = atomicCAS(p, assumed,
-                        *reinterpret_cast<const unsigned long long*>(&desired));
+        old = atomicCAS(
+            p, assumed, *reinterpret_cast<const unsigned long long*>(&desired));
     } while (assumed != old);
 }
 __device__ inline void atomic_mul(std::int32_t* addr, std::int32_t v) {
@@ -192,37 +192,37 @@ __device__ inline void atomic_mul(std::int64_t* addr, std::int64_t v) {
         const std::int64_t cur =
             *reinterpret_cast<const std::int64_t*>(&assumed);
         const std::int64_t desired = cur * v;
-        old = atomicCAS(p, assumed,
-                        *reinterpret_cast<const unsigned long long*>(&desired));
+        old = atomicCAS(
+            p, assumed, *reinterpret_cast<const unsigned long long*>(&desired));
     } while (assumed != old);
 }
 
 // NaN detection helper: integral types are never NaN.
-template <typename T>
+template<typename T>
 __host__ __device__ constexpr bool is_nan(T /*v*/) {
     return false;
 }
-template <>
+template<>
 __host__ __device__ inline bool is_nan<float>(float v) {
     return isnan(v);
 }
-template <>
+template<>
 __host__ __device__ inline bool is_nan<double>(double v) {
     return isnan(v);
 }
 #ifdef __CUDACC__
-template <>
+template<>
 __host__ __device__ inline bool is_nan<__half>(__half v) {
     return __hisnan(v);
 }
-template <>
+template<>
 __host__ __device__ inline bool is_nan<__nv_bfloat16>(__nv_bfloat16 v) {
     return __hisnan(v);
 }
 #endif  // __CUDACC__
 
 // Combine one source value into the accumulator at `addr` per `op`.
-template <typename T>
+template<typename T>
 __device__ inline void combine_atomic(ReductionOpCode op, T* addr, T v) {
     switch (op) {
         case ReductionOpCode::Sum:
@@ -239,10 +239,14 @@ __device__ inline void combine_atomic(ReductionOpCode op, T* addr, T v) {
             atomic_mul(addr, v);
             return;
         case ReductionOpCode::NanMin:
-            if (!is_nan(v)) { atomic_min(addr, v); }
+            if (!is_nan(v)) {
+                atomic_min(addr, v);
+            }
             return;
         case ReductionOpCode::NanMax:
-            if (!is_nan(v)) { atomic_max(addr, v); }
+            if (!is_nan(v)) {
+                atomic_max(addr, v);
+            }
             return;
         default:
             return;  // All/Any reach serial path only (bool not atomic).
@@ -251,7 +255,7 @@ __device__ inline void combine_atomic(ReductionOpCode op, T* addr, T v) {
 
 // Identity element for `op` (matches ReductionCPU.cpp). Callable from host
 // (entry-point seeding) and device (serial fallback).
-template <typename T>
+template<typename T>
 __host__ __device__ T identity_value(ReductionOpCode op) {
     switch (op) {
         case ReductionOpCode::Sum:
@@ -274,7 +278,7 @@ __host__ __device__ T identity_value(ReductionOpCode op) {
 }
 
 // Fold one source value `v` into `acc` (used by the serial fallback path).
-template <typename T>
+template<typename T>
 __host__ __device__ T combine_value(ReductionOpCode op, T acc, T v) {
     switch (op) {
         case ReductionOpCode::Sum:
@@ -287,10 +291,14 @@ __host__ __device__ T combine_value(ReductionOpCode op, T acc, T v) {
         case ReductionOpCode::Prod:
             return static_cast<T>(acc * v);
         case ReductionOpCode::NanMin:
-            if (is_nan(v)) { return acc; }
+            if (is_nan(v)) {
+                return acc;
+            }
             return v < acc ? v : acc;
         case ReductionOpCode::NanMax:
-            if (is_nan(v)) { return acc; }
+            if (is_nan(v)) {
+                return acc;
+            }
             return v > acc ? v : acc;
         case ReductionOpCode::All:
             return static_cast<T>(acc && v);
@@ -307,7 +315,7 @@ __host__ __device__ T combine_value(ReductionOpCode op, T acc, T v) {
     if (src.scalar_type() == DT) {                                             \
         using scalar_t = CPP;                                                  \
         const auto id = identity_value<scalar_t>(op);                          \
-        Fill(dst, Scalar(static_cast<double>(id)));                           \
+        Fill(dst, Scalar(static_cast<double>(id)));                            \
         core::Indexer indexer(                                                 \
             {src}, dst, core::DtypePolicy::ALL_SAME, reduction_dims);          \
         core::ParallelFor(                                                     \

@@ -7,7 +7,7 @@
 // Modeled on LichtFeld-Studio's CudaEventPool.
 //
 // This header is visible only when BUILD_CUDA_MODULE is enabled
-// (same guard discipline as CUDAUtils.h / CUDAStreamContext.h).
+// (same guard discipline as the public zt/cuda/{Exception,Guard,Stream}.h).
 
 #pragma once
 

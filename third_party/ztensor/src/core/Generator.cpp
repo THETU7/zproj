@@ -23,8 +23,6 @@ void Generator::set_global_seed(uint64_t seed) noexcept {
     g_global_seed.store(seed, std::memory_order_relaxed);
 }
 
-void manual_seed(uint64_t seed) {
-    Generator::set_global_seed(seed);
-}
+void manual_seed(uint64_t seed) { Generator::set_global_seed(seed); }
 
 }  // namespace zt

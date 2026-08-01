@@ -11,37 +11,40 @@
 
 #include "core/cuda/CudaMemoryPool.h"
 
-#include "core/cuda/CUDAEventPool.h"          // bridgeStreams
-#include "ztensor/zt/cuda/Stream.h"      // GetCurrentStream
-#include "ztensor/zt/cuda/Exception.h"   // ZT_CUDA_CHECK
-#include "ztensor/zt/cuda/Guard.h"       // CUDAScopedDevice
-#include "core/tensor/cuda/internal/DeferredFreeQueue.hpp"
-#include "core/tensor/cuda/internal/GPUSlabAllocator.hpp"
-#include "core/tensor/cuda/internal/SizeBucketedPool.hpp"
-
 #include <algorithm>  // std::remove
 #include <cstdlib>    // std::getenv
 #include <sstream>
 
+#include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK
+#include "ztensor/zt/cuda/Guard.h"      // CUDAScopedDevice
+#include "ztensor/zt/cuda/Stream.h"     // GetCurrentStream
 #include "ztensor/zt/utility/Log.h"
+
+#include "core/cuda/CUDAEventPool.h"  // bridgeStreams
+#include "core/tensor/cuda/internal/DeferredFreeQueue.hpp"
+#include "core/tensor/cuda/internal/GPUSlabAllocator.hpp"
+#include "core/tensor/cuda/internal/SizeBucketedPool.hpp"
 
 namespace zt {
 
-// ── Environment check ──────────────────────────────────────────────────────────
+// ── Environment check
+// ──────────────────────────────────────────────────────────
 
 /*static*/ bool CudaMemoryPool::cache_disabled_by_env() {
     const char* val = std::getenv("ZT_DISABLE_CUDA_CACHE");
     return val != nullptr && (val[0] == '1' || val[0] == 'y' || val[0] == 'Y');
 }
 
-// ── Singleton ──────────────────────────────────────────────────────────────────
+// ── Singleton
+// ──────────────────────────────────────────────────────────────────
 
 CudaMemoryPool& CudaMemoryPool::instance() {
     static CudaMemoryPool pool;
     return pool;
 }
 
-// ── Construction / destruction ─────────────────────────────────────────────────
+// ── Construction / destruction
+// ─────────────────────────────────────────────────
 
 CudaMemoryPool::CudaMemoryPool() {
     // Call configure() lazily on first allocate() to avoid touching the CUDA
@@ -49,11 +52,10 @@ CudaMemoryPool::CudaMemoryPool() {
     // is called early.
 }
 
-CudaMemoryPool::~CudaMemoryPool() {
-    shutdown();
-}
+CudaMemoryPool::~CudaMemoryPool() { shutdown(); }
 
-// ── configure ──────────────────────────────────────────────────────────────────
+// ── configure
+// ──────────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::configure() {
     std::call_once(configure_once_, [this]() {
@@ -61,9 +63,10 @@ void CudaMemoryPool::configure() {
         int device = 0;
         cudaError_t err = cudaGetDevice(&device);
         if (err != cudaSuccess) {
-            ZT_LOG_WARNING("CudaMemoryPool: cudaGetDevice failed ({}) — "
-                           "skipping driver pool config",
-                           cudaGetErrorString(err));
+            ZT_LOG_WARNING(
+                "CudaMemoryPool: cudaGetDevice failed ({}) — "
+                "skipping driver pool config",
+                cudaGetErrorString(err));
             slab_enabled_ = true;
             configured_ = true;
             return;
@@ -72,9 +75,10 @@ void CudaMemoryPool::configure() {
         cudaMemPool_t pool;
         err = cudaDeviceGetDefaultMemPool(&pool, device);
         if (err != cudaSuccess) {
-            ZT_LOG_WARNING("CudaMemoryPool: cudaDeviceGetDefaultMemPool failed "
-                           "({}) — skipping driver pool config",
-                           cudaGetErrorString(err));
+            ZT_LOG_WARNING(
+                "CudaMemoryPool: cudaDeviceGetDefaultMemPool failed "
+                "({}) — skipping driver pool config",
+                cudaGetErrorString(err));
             slab_enabled_ = true;
             configured_ = true;
             return;
@@ -87,10 +91,11 @@ void CudaMemoryPool::configure() {
         cudaMemPoolSetAttribute(
             pool, cudaMemPoolAttrReleaseThreshold, &threshold);
 
-        ZT_LOG_INFO("CudaMemoryPool: driver pool configured (device {}, "
-                    "ReleaseThreshold=64 MiB, CUDA {})",
-                    device,
-                    CUDART_VERSION);
+        ZT_LOG_INFO(
+            "CudaMemoryPool: driver pool configured (device {}, "
+            "ReleaseThreshold=64 MiB, CUDA {})",
+            device,
+            CUDART_VERSION);
 #else
         ZT_LOG_INFO("CudaMemoryPool: CUDA {} — driver pool API not available, "
                     "async tier disabled",
@@ -102,7 +107,8 @@ void CudaMemoryPool::configure() {
     });
 }
 
-// ── shutdown ───────────────────────────────────────────────────────────────────
+// ── shutdown
+// ───────────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::shutdown() {
     bool expected = false;
@@ -120,7 +126,8 @@ void CudaMemoryPool::shutdown() {
     ::zt::cuda::CudaEventPool::instance().shutdown();
 }
 
-// ── allocate ───────────────────────────────────────────────────────────────────
+// ── allocate
+// ───────────────────────────────────────────────────────────────────
 
 void* CudaMemoryPool::allocate(size_t bytes, cudaStream_t stream) {
     if (bytes == 0) return nullptr;
@@ -161,8 +168,7 @@ void* CudaMemoryPool::allocate(size_t bytes, cudaStream_t stream) {
             return ptr;
         }
 
-        const size_t bucket_size =
-            SizeBucketedPool::get_bucket_size(bytes);
+        const size_t bucket_size = SizeBucketedPool::get_bucket_size(bytes);
 
 #if CUDART_VERSION >= 11020
         cudaError_t err = cudaMallocAsync(&ptr, bucket_size, stream);
@@ -204,7 +210,8 @@ void* CudaMemoryPool::allocate(size_t bytes, cudaStream_t stream) {
     return allocate_direct(bytes);
 }
 
-// ── deallocate ─────────────────────────────────────────────────────────────────
+// ── deallocate
+// ─────────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::deallocate(void* ptr, size_t bytes, cudaStream_t stream) {
     (void)bytes;  // size is retrieved from allocation_map_
@@ -260,7 +267,8 @@ void CudaMemoryPool::deallocate(void* ptr, cudaStream_t stream) {
 #endif
 }
 
-// ── Stream helpers ─────────────────────────────────────────────────────────────
+// ── Stream helpers
+// ─────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::record_stream(void* ptr, cudaStream_t stream) {
     if (!ptr) return;
@@ -290,9 +298,8 @@ void CudaMemoryPool::rehome_stream(void* ptr, cudaStream_t stream) {
         info.extra_streams.push_back(info.home_stream);
     }
     info.extra_streams.erase(
-        std::remove(info.extra_streams.begin(),
-                    info.extra_streams.end(),
-                    stream),
+        std::remove(
+            info.extra_streams.begin(), info.extra_streams.end(), stream),
         info.extra_streams.end());
     info.home_stream = stream;
 }
@@ -305,11 +312,10 @@ void CudaMemoryPool::release_stream(cudaStream_t stream) {
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         for (auto& [ptr, info] : allocation_map_) {
-            info.extra_streams.erase(
-                std::remove(info.extra_streams.begin(),
-                            info.extra_streams.end(),
-                            stream),
-                info.extra_streams.end());
+            info.extra_streams.erase(std::remove(info.extra_streams.begin(),
+                                                 info.extra_streams.end(),
+                                                 stream),
+                                     info.extra_streams.end());
             if (info.home_stream == stream) {
                 info.home_stream = nullptr;  // migrate to legacy stream
             }
@@ -320,7 +326,8 @@ void CudaMemoryPool::release_stream(cudaStream_t stream) {
     SizeBucketedPool::instance().retag_stream(stream, nullptr);
 }
 
-// ── Maintenance ────────────────────────────────────────────────────────────────
+// ── Maintenance
+// ────────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::trim() {
     SizeBucketedPool::instance().trim_cache();
@@ -359,7 +366,8 @@ void CudaMemoryPool::trim_cached_memory() {
 #endif
 }
 
-// ── Statistics ─────────────────────────────────────────────────────────────────
+// ── Statistics
+// ─────────────────────────────────────────────────────────────────
 
 std::string CudaMemoryPool::get_stats_string() const {
     std::ostringstream oss;
@@ -381,8 +389,7 @@ std::string CudaMemoryPool::get_stats_string() const {
         cudaMemPool_t pool;
         if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess) {
             uint64_t used = 0, reserved = 0;
-            cudaMemPoolGetAttribute(
-                pool, cudaMemPoolAttrUsedMemCurrent, &used);
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used);
             cudaMemPoolGetAttribute(
                 pool, cudaMemPoolAttrReservedMemCurrent, &reserved);
             oss << "  CUDA pool: " << (used / 1024.0 / 1024.0) << " / "
@@ -399,7 +406,8 @@ void CudaMemoryPool::print_stats() const {
     SizeBucketedPool::instance().print_stats();
 }
 
-// ── Private helpers ────────────────────────────────────────────────────────────
+// ── Private helpers
+// ────────────────────────────────────────────────────────────
 
 void CudaMemoryPool::track_allocation(void* ptr,
                                       size_t size,
@@ -426,20 +434,20 @@ void CudaMemoryPool::free_routed(void* ptr, const AllocationInfo& info) {
     }
 
     switch (info.method) {
-    case AllocMethod::Slab:
-        GPUSlabAllocator::instance().deallocate(
-            ptr, info.size, info.home_stream);
-        return;
-    case AllocMethod::Bucketed:
-        SizeBucketedPool::instance().deallocate(
-            ptr, info.size, info.home_stream);
-        return;
-    case AllocMethod::Direct:
-        cudaFree(ptr);
-        direct_alloc_count_.fetch_sub(1, std::memory_order_release);
-        return;
-    case AllocMethod::Async:
-        break;  // fall through to cudaFreeAsync below
+        case AllocMethod::Slab:
+            GPUSlabAllocator::instance().deallocate(
+                ptr, info.size, info.home_stream);
+            return;
+        case AllocMethod::Bucketed:
+            SizeBucketedPool::instance().deallocate(
+                ptr, info.size, info.home_stream);
+            return;
+        case AllocMethod::Direct:
+            cudaFree(ptr);
+            direct_alloc_count_.fetch_sub(1, std::memory_order_release);
+            return;
+        case AllocMethod::Async:
+            break;  // fall through to cudaFreeAsync below
     }
 
 #if CUDART_VERSION >= 11020
@@ -454,10 +462,11 @@ void* CudaMemoryPool::allocate_direct(size_t bytes) {
 
     cudaError_t err = cudaMalloc(&ptr, bytes);
     if (err != cudaSuccess) {
-        ZT_LOG_WARNING("CudaMemoryPool: cudaMalloc({} B) failed ({}), "
-                       "trimming and retrying...",
-                       bytes,
-                       cudaGetErrorString(err));
+        ZT_LOG_WARNING(
+            "CudaMemoryPool: cudaMalloc({} B) failed ({}), "
+            "trimming and retrying...",
+            bytes,
+            cudaGetErrorString(err));
         cudaDeviceSynchronize();
         SizeBucketedPool::instance().trim_cache();
 #if CUDART_VERSION >= 11020
@@ -471,10 +480,11 @@ void* CudaMemoryPool::allocate_direct(size_t bytes) {
 #endif
         err = cudaMalloc(&ptr, bytes);
         if (err != cudaSuccess) {
-            ZT_LOG_ERROR("CudaMemoryPool: cudaMalloc({} B) retry also "
-                         "failed ({})",
-                         bytes,
-                         cudaGetErrorString(err));
+            ZT_LOG_ERROR(
+                "CudaMemoryPool: cudaMalloc({} B) retry also "
+                "failed ({})",
+                bytes,
+                cudaGetErrorString(err));
             cudaGetLastError();  // clear sticky error
             return nullptr;
         }

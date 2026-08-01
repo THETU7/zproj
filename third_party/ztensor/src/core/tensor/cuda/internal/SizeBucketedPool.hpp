@@ -22,15 +22,13 @@
 // Modeled on LichtFeld-Studio's SizeBucketedPool.
 //
 // This header is visible only when BUILD_CUDA_MODULE is enabled
-// (same guard discipline as CUDAUtils.h / CUDAEventPool.h).
+// (same guard discipline as the public zt/cuda/{Exception,Guard,Stream}.h).
 
 #pragma once
 
 #ifdef BUILD_CUDA_MODULE
 
 #include <cuda_runtime.h>
-
-#include "core/cuda/CUDAEventPool.h"  // bridgeStreams
 
 #include <algorithm>
 #include <array>
@@ -41,17 +39,21 @@
 #include <mutex>
 #include <vector>
 
+#include "core/cuda/CUDAEventPool.h"  // bridgeStreams
+
 namespace zt {
 
-// ── SizeBucketedPool ───────────────────────────────────────────────────────────
+// ── SizeBucketedPool
+// ───────────────────────────────────────────────────────────
 
 class SizeBucketedPool {
 public:
-    static constexpr size_t MIN_BUCKET_SIZE = 256 * 1024;           // 256 KiB
-    static constexpr size_t MAX_TRACKED_SIZE = 16ULL * 1024 * 1024 * 1024;  // 16 GiB
+    static constexpr size_t MIN_BUCKET_SIZE = 256 * 1024;  // 256 KiB
+    static constexpr size_t MAX_TRACKED_SIZE =
+        16ULL * 1024 * 1024 * 1024;  // 16 GiB
     static constexpr size_t CACHE_SIZE_PER_BUCKET = 4;
-    static constexpr size_t MIN_CACHE_BUDGET = 64ULL * 1024 * 1024;  // 64 MiB
-    static constexpr size_t MAX_CACHE_BUDGET = 256ULL * 1024 * 1024; // 256 MiB
+    static constexpr size_t MIN_CACHE_BUDGET = 64ULL * 1024 * 1024;   // 64 MiB
+    static constexpr size_t MAX_CACHE_BUDGET = 256ULL * 1024 * 1024;  // 256 MiB
     static constexpr size_t NUM_BUCKETS = 128;
 
     struct Stats {
@@ -75,7 +77,8 @@ public:
         trim_cache();
     }
 
-    // ── Bucket sizing ──────────────────────────────────────────────────────────
+    // ── Bucket sizing
+    // ──────────────────────────────────────────────────────────
     //
     // Non-uniform logarithmic buckets:
     //   ≤256 KiB  → 256 KiB
@@ -99,15 +102,15 @@ public:
             return ((bytes + 64 * 1024 * 1024 - 1) / (64 * 1024 * 1024)) *
                    (64 * 1024 * 1024);
         if (bytes <= 8ULL * 1024 * 1024 * 1024)
-            return ((bytes + 256ULL * 1024 * 1024 - 1) / (256ULL * 1024 * 1024)) *
+            return ((bytes + 256ULL * 1024 * 1024 - 1) /
+                    (256ULL * 1024 * 1024)) *
                    (256ULL * 1024 * 1024);
         return ((bytes + 1024ULL * 1024 * 1024 - 1) / (1024ULL * 1024 * 1024)) *
                (1024ULL * 1024 * 1024);
     }
 
     static size_t get_bucket_index(size_t bucket_size) {
-        if (bucket_size <= 1024 * 1024)
-            return (bucket_size / (256 * 1024)) - 1;
+        if (bucket_size <= 1024 * 1024) return (bucket_size / (256 * 1024)) - 1;
         if (bucket_size <= 16 * 1024 * 1024)
             return 4 + (bucket_size / (1024 * 1024)) - 1;
         if (bucket_size <= 256 * 1024 * 1024)
@@ -121,7 +124,8 @@ public:
     }
 
     static size_t max_cached_entries_for_bucket(size_t bucket_size) {
-        if (bucket_size <= 16ULL * 1024 * 1024) return CACHE_SIZE_PER_BUCKET;  // 4
+        if (bucket_size <= 16ULL * 1024 * 1024)
+            return CACHE_SIZE_PER_BUCKET;  // 4
         if (bucket_size <= 64ULL * 1024 * 1024) return 3;
         if (bucket_size <= 256ULL * 1024 * 1024) return 2;
         return 1;
@@ -132,7 +136,8 @@ public:
         return std::clamp(total_bytes / 96, MIN_CACHE_BUDGET, MAX_CACHE_BUDGET);
     }
 
-    // ── Primary interface ──────────────────────────────────────────────────────
+    // ── Primary interface
+    // ──────────────────────────────────────────────────────
 
     // Try to serve `bytes` from the cache.  Returns nullptr on miss (caller
     // should allocate fresh).  On a cross-stream hit, bridges the old stream
@@ -159,8 +164,8 @@ public:
                 bucket.cache.erase(bucket.cache.begin() + pick);
                 if (block.stream != stream) {
                     ::zt::cuda::bridgeStreams(block.stream, stream);
-                    stats_.cross_stream_reuse.fetch_add(1,
-                                                        std::memory_order_relaxed);
+                    stats_.cross_stream_reuse.fetch_add(
+                        1, std::memory_order_relaxed);
                 }
                 bucket.cached_bytes -= bucket_size;
                 bucket.hits++;
@@ -194,9 +199,9 @@ public:
 
             // Large probationary heuristic: skip caching one-shot giant allocs.
             const size_t budget = current_cache_budget();
-            const bool large_probationary =
-                bucket_size > budget / 2 && bucket.hits == 0 &&
-                bucket.misses < 2;
+            const bool large_probationary = bucket_size > budget / 2 &&
+                                            bucket.hits == 0 &&
+                                            bucket.misses < 2;
             if (large_probationary) {
                 cudaFreeAsync(ptr, stream);
                 return true;  // freed, not cached
@@ -255,7 +260,8 @@ public:
         }
     }
 
-    // ── Stream re-tagging ──────────────────────────────────────────────────────
+    // ── Stream re-tagging
+    // ──────────────────────────────────────────────────────
 
     // Re-tag cached entries from `from` to `to`.  Caller must have synchronised
     // `from` first — once the stream is idle, its entries can safely be reused
@@ -282,7 +288,8 @@ public:
         }
     }
 
-    // ── Cache trimming ─────────────────────────────────────────────────────────
+    // ── Cache trimming
+    // ─────────────────────────────────────────────────────────
 
     // Free all cached entries (stream-ordered on their last-use stream).
     void trim_cache() {
@@ -297,7 +304,8 @@ public:
         stats_.bytes_cached.store(0, std::memory_order_relaxed);
     }
 
-    // ── Statistics ─────────────────────────────────────────────────────────────
+    // ── Statistics
+    // ─────────────────────────────────────────────────────────────
 
     const Stats& stats() const { return stats_; }
 
@@ -306,14 +314,15 @@ public:
         uint64_t misses = stats_.cache_misses.load();
         double hit_rate =
             (hits + misses > 0) ? (100.0 * hits / (hits + misses)) : 0.0;
-        ZT_LOG_INFO("SizeBucketedPool: hits={} ({:.1f}%) misses={} "
-                    "cached={:.2f} MiB wasted={:.2f} MiB cross_stream={}",
-                    hits,
-                    hit_rate,
-                    misses,
-                    stats_.bytes_cached.load() / (1024.0 * 1024.0),
-                    stats_.bytes_wasted.load() / (1024.0 * 1024.0),
-                    stats_.cross_stream_reuse.load());
+        ZT_LOG_INFO(
+            "SizeBucketedPool: hits={} ({:.1f}%) misses={} "
+            "cached={:.2f} MiB wasted={:.2f} MiB cross_stream={}",
+            hits,
+            hit_rate,
+            misses,
+            stats_.bytes_cached.load() / (1024.0 * 1024.0),
+            stats_.bytes_wasted.load() / (1024.0 * 1024.0),
+            stats_.cross_stream_reuse.load());
     }
 
     // Waste percentage for a hypothetical allocation.
@@ -329,7 +338,8 @@ private:
     SizeBucketedPool() = default;
     ~SizeBucketedPool() { shutdown(); }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
+    // ── Internal helpers
+    // ──────────────────────────────────────────────────────
 
     size_t current_cache_budget() {
         const size_t cached =
@@ -373,7 +383,8 @@ private:
 
             const uint64_t epoch = bucket.last_hit_epoch;
             if (best == NUM_BUCKETS || epoch < best_epoch ||
-                (epoch == best_epoch && bucket.bucket_size > best_bucket_size)) {
+                (epoch == best_epoch &&
+                 bucket.bucket_size > best_bucket_size)) {
                 best = i;
                 best_epoch = epoch;
                 best_bucket_size = bucket.bucket_size;
@@ -393,8 +404,7 @@ private:
             CachedBlock victim{};
             size_t victim_size = 0;
             {
-                std::lock_guard<std::mutex> lock(
-                    buckets_[victim_idx].mutex);
+                std::lock_guard<std::mutex> lock(buckets_[victim_idx].mutex);
                 Bucket& bucket = buckets_[victim_idx];
                 if (bucket.cache.empty() || bucket.bucket_size == 0) continue;
                 victim = bucket.cache.front();
@@ -408,7 +418,8 @@ private:
         }
     }
 
-    // ── Data ───────────────────────────────────────────────────────────────────
+    // ── Data
+    // ───────────────────────────────────────────────────────────────────
 
     struct CachedBlock {
         void* ptr = nullptr;

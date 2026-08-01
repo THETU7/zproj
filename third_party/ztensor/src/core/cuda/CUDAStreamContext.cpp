@@ -1,10 +1,11 @@
 // ztensor/core/CUDAStreamContext.cu
 //
 // Out-of-line definitions for the per-thread CUDA stream helpers declared in
-// CUDAStreamContext.h.  Compiled only under BUILD_CUDA_MODULE (NVCC).
+// the public zt/cuda/Stream.h. Compiled only under BUILD_CUDA_MODULE.
+
+#include "ztensor/zt/cuda/Stream.h"
 
 #include "core/cuda/CUDAEventPool.h"
-#include "ztensor/zt/cuda/Stream.h"
 
 namespace zt {
 namespace cuda {

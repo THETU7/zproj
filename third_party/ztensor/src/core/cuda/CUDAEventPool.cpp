@@ -3,9 +3,9 @@
 // Out-of-line definitions for CudaEventPool and bridgeStreams.  Compiled only
 // under BUILD_CUDA_MODULE (NVCC).
 
-#include "ztensor/zt/utility/Log.h"
-
 #include "core/cuda/CUDAEventPool.h"
+
+#include "ztensor/zt/utility/Log.h"
 
 namespace zt {
 namespace cuda {

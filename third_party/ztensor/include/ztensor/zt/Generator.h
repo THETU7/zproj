@@ -102,10 +102,8 @@ private:
         }
         // Tenth round (no Weyl addition, per the spec).
         {
-            uint64_t p0 = philox_mul32(
-                s0, static_cast<uint32_t>(kPhiloxMul));
-            uint64_t p2 = philox_mul32(
-                s2, static_cast<uint32_t>(kPhiloxMul));
+            uint64_t p0 = philox_mul32(s0, static_cast<uint32_t>(kPhiloxMul));
+            uint64_t p2 = philox_mul32(s2, static_cast<uint32_t>(kPhiloxMul));
             uint32_t ns0 = static_cast<uint32_t>(p2 >> 32) ^ k1 ^ s3;
             uint32_t ns1 = static_cast<uint32_t>(p2) ^ k0 ^ s2;
             uint32_t ns2 = static_cast<uint32_t>(p0 >> 32) ^ k1 ^ s1;
@@ -128,10 +126,8 @@ private:
                                             uint32_t& s3,
                                             uint32_t k0,
                                             uint32_t k1) noexcept {
-        uint64_t p0 = philox_mul32(
-            s0, static_cast<uint32_t>(kPhiloxMul));
-        uint64_t p2 = philox_mul32(
-            s2, static_cast<uint32_t>(kPhiloxMul));
+        uint64_t p0 = philox_mul32(s0, static_cast<uint32_t>(kPhiloxMul));
+        uint64_t p2 = philox_mul32(s2, static_cast<uint32_t>(kPhiloxMul));
 
         uint32_t ns0 = static_cast<uint32_t>(p2 >> 32) ^ k1 ^ s3;
         uint32_t ns1 = static_cast<uint32_t>(p2) ^ k0;
@@ -159,9 +155,8 @@ ZT_HOST_DEVICE inline float philox_uniform_float_u32(uint32_t x) noexcept {
 ZT_HOST_DEVICE inline double philox_uniform_double_u64(uint32_t hi,
                                                        uint32_t lo) noexcept {
     constexpr double kScale = 0x1.0p-52;
-    uint64_t combined =
-        (static_cast<uint64_t>(hi & 0x03FFFFFFU) << 26) |
-        static_cast<uint64_t>(lo >> 6);
+    uint64_t combined = (static_cast<uint64_t>(hi & 0x03FFFFFFU) << 26) |
+                        static_cast<uint64_t>(lo >> 6);
     return static_cast<double>(combined) * kScale;
 }
 
@@ -204,9 +199,7 @@ public:
     explicit Generator(uint64_t seed, uint64_t counter_offset = 0)
         : seed_(seed), counter_offset_(counter_offset) {}
 
-    uint64_t seed() const noexcept {
-        return seed_ > 0 ? seed_ : global_seed();
-    }
+    uint64_t seed() const noexcept { return seed_ > 0 ? seed_ : global_seed(); }
     uint64_t counter_offset() const noexcept { return counter_offset_; }
 
     Generator offset(uint64_t n) const {

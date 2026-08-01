@@ -12,10 +12,11 @@
 
 #include <cstddef>
 
-#include "core/cuda/CudaMemoryPool.h"  // CudaMemoryPool::instance()
 #include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK
-#include "ztensor/zt/cuda/Guard.h"  // CUDAScopedDevice
-#include "ztensor/zt/cuda/Stream.h"  // cuda::GetStream
+#include "ztensor/zt/cuda/Guard.h"      // CUDAScopedDevice
+#include "ztensor/zt/cuda/Stream.h"     // cuda::GetStream
+
+#include "core/cuda/CudaMemoryPool.h"  // CudaMemoryPool::instance()
 
 namespace zt {
 namespace {

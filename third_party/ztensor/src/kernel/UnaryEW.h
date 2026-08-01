@@ -27,7 +27,7 @@ enum class UnaryEWOpCode : std::uint8_t {
     Frac,        // a - floor(a)  (float only)
 
     // ── trigonometric ────────────────────────────────────────────────────
-    Sin,         // (float only)
+    Sin,  // (float only)
     Cos,
     Tan,
     Asin,
@@ -35,16 +35,16 @@ enum class UnaryEWOpCode : std::uint8_t {
     Atan,
 
     // ── hyperbolic ───────────────────────────────────────────────────────
-    Sinh,        // (float only)
+    Sinh,  // (float only)
     Cosh,
     Tanh,
 
     // ── rounding ─────────────────────────────────────────────────────────
-    Floor,       // ⌊a⌋  (float only)
-    Ceil,        // ⌈a⌉  (float only)
-    Round,       // round-to-nearest-even (float only)
-    Trunc,       // integer part  (float only)
-    Sign,        // -1/0/+1
+    Floor,  // ⌊a⌋  (float only)
+    Ceil,   // ⌈a⌉  (float only)
+    Round,  // round-to-nearest-even (float only)
+    Trunc,  // integer part  (float only)
+    Sign,   // -1/0/+1
 
     // ── logical / bitwise ────────────────────────────────────────────────
     LogicalNot,  // !a

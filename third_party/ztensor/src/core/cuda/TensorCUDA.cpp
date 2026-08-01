@@ -8,14 +8,15 @@
 // These are thin delegates to CudaMemoryPool; the heavy logic lives in the
 // four-tier allocator (§8.5.E E-3).
 
+#include "ztensor/zt/cuda/Stream.h"  // GetCurrentStream
 #include "ztensor/zt/Tensor.h"
 
 #include "core/cuda/CudaMemoryPool.h"
-#include "ztensor/zt/cuda/Stream.h"  // GetCurrentStream
 
 namespace zt {
 
-// ── Static memory-pool helpers ─────────────────────────────────────────────────
+// ── Static memory-pool helpers
+// ─────────────────────────────────────────────────
 
 #ifdef BUILD_CUDA_MODULE
 
@@ -35,7 +36,8 @@ namespace zt {
 
 #endif  // BUILD_CUDA_MODULE
 
-// ── Per-tensor stream operations ───────────────────────────────────────────────
+// ── Per-tensor stream operations
+// ───────────────────────────────────────────────
 
 #ifdef __CUDACC__
 

@@ -124,9 +124,10 @@ ZT_HOST_DEVICE inline uint16_t fp32_to_fp16_bits(uint32_t f_bits) {
     // NaN or Inf
     if (exp32 == 0xFF) {
         if (mant32 == 0) return static_cast<uint16_t>(sign | 0x7C00U);  // Inf
-        // NaN: preserve the top bits of the mantissa to distinguish quiet/signaling
-        return static_cast<uint16_t>(
-            sign | 0x7C00U | ((mant32 >> 13) & 0x3FFU) | 0x200U);
+        // NaN: preserve the top bits of the mantissa to distinguish
+        // quiet/signaling
+        return static_cast<uint16_t>(sign | 0x7C00U |
+                                     ((mant32 >> 13) & 0x3FFU) | 0x200U);
     }
 
     // Normal number
@@ -281,7 +282,7 @@ inline std::ostream& operator<<(std::ostream& out, Half value) {
 // ============================================================================
 namespace std {
 
-template <>
+template<>
 class numeric_limits<zt::Half> {
 public:
     static constexpr bool is_specialized = true;
@@ -293,18 +294,17 @@ public:
     static constexpr bool has_signaling_NaN = true;
     static constexpr std::float_denorm_style has_denorm = denorm_present;
     static constexpr bool has_denorm_loss = false;
-    static constexpr std::float_round_style round_style =
-        std::round_to_nearest;
+    static constexpr std::float_round_style round_style = std::round_to_nearest;
     static constexpr bool is_iec559 = true;
     static constexpr bool is_bounded = true;
     static constexpr bool is_modulo = false;
-    static constexpr int digits = 11;       // 10 mantissa + 1 implicit
-    static constexpr int digits10 = 3;      // floor((10) * log10(2))
+    static constexpr int digits = 11;   // 10 mantissa + 1 implicit
+    static constexpr int digits10 = 3;  // floor((10) * log10(2))
     static constexpr int max_digits10 = 5;
     static constexpr int radix = 2;
     static constexpr int min_exponent = -13;  // subnormal: -(14+10-1)
     static constexpr int min_exponent10 = -4;
-    static constexpr int max_exponent = 16;   // 1 past max exponent value
+    static constexpr int max_exponent = 16;  // 1 past max exponent value
     static constexpr int max_exponent10 = 4;
     static constexpr bool traps = true;
     static constexpr bool tinyness_before = true;

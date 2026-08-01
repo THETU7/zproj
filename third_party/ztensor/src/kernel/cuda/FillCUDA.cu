@@ -14,10 +14,10 @@
 #include <type_traits>
 
 #include "ztensor/zt/BFloat16.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/Half.h"
 #include "ztensor/zt/Scalar.h"
 
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"

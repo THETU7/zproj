@@ -15,9 +15,9 @@
 
 #include <cuda_runtime.h>
 
+#include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"

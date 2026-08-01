@@ -26,10 +26,9 @@
 #include <vector>
 
 #include "ztensor/zt/ArrayRef.h"
+#include "ztensor/zt/Macros.h"
 #include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/utility/Log.h"
-
-#include "ztensor/zt/Macros.h"
 
 namespace zt::core {
 

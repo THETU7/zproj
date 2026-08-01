@@ -23,31 +23,35 @@ namespace {
 
 // ── Uniform [from, to) per-dtype helpers ─────────────────────────────────
 
-template <typename scalar_t>
+template<typename scalar_t>
 inline scalar_t UniformSample(const PhiloxEngine::Output& out,
-                              double from, double to) {
+                              double from,
+                              double to) {
     if constexpr (std::is_same_v<scalar_t, float>) {
         float u = philox_uniform_float_u32(out[0]);
-        return static_cast<scalar_t>(
-            static_cast<float>(from) + u * static_cast<float>(to - from));
+        return static_cast<scalar_t>(static_cast<float>(from) +
+                                     u * static_cast<float>(to - from));
     } else if constexpr (std::is_same_v<scalar_t, double>) {
         double u = philox_uniform_double_u64(out[0], out[1]);
         return static_cast<scalar_t>(from + u * (to - from));
     } else {
         // Half, BFloat16.
         float u = philox_uniform_float_u32(out[0]);
-        return static_cast<scalar_t>(
-            static_cast<float>(from) + u * static_cast<float>(to - from));
+        return static_cast<scalar_t>(static_cast<float>(from) +
+                                     u * static_cast<float>(to - from));
     }
 }
 
 // ── Normal(mean, stddev) per-dtype helpers ───────────────────────────────
 // Each call fills two consecutive elements using Box-Muller.
 
-template <typename scalar_t>
-inline void NormalSamplePair(scalar_t* dst0, scalar_t* dst1,
+template<typename scalar_t>
+inline void NormalSamplePair(scalar_t* dst0,
+                             scalar_t* dst1,
                              uint64_t counter_base,
-                             uint64_t seed, double mean, double stddev) {
+                             uint64_t seed,
+                             double mean,
+                             double stddev) {
     PhiloxEngine eng0(seed, counter_base);
     PhiloxEngine eng1(seed, counter_base + 1);
     PhiloxEngine::Output out0, out1;
@@ -66,18 +70,19 @@ inline void NormalSamplePair(scalar_t* dst0, scalar_t* dst1,
         float u2 = philox_uniform_float_u32(out1[0]);
         float n1, n2;
         philox_box_muller(u1, u2, n1, n2);
-        *dst0 = static_cast<scalar_t>(
-            static_cast<float>(mean) + n1 * static_cast<float>(stddev));
-        *dst1 = static_cast<scalar_t>(
-            static_cast<float>(mean) + n2 * static_cast<float>(stddev));
+        *dst0 = static_cast<scalar_t>(static_cast<float>(mean) +
+                                      n1 * static_cast<float>(stddev));
+        *dst1 = static_cast<scalar_t>(static_cast<float>(mean) +
+                                      n2 * static_cast<float>(stddev));
     }
 }
 
 // ── Int uniform [low, high) per-dtype helper ─────────────────────────────
 
-template <typename scalar_t>
+template<typename scalar_t>
 inline scalar_t IntSample(const PhiloxEngine::Output& out,
-                          int64_t low, uint64_t range) {
+                          int64_t low,
+                          uint64_t range) {
     uint64_t v = static_cast<uint64_t>(out[0]);
     return static_cast<scalar_t>(static_cast<int64_t>(v % range) + low);
 }
@@ -86,8 +91,7 @@ inline scalar_t IntSample(const PhiloxEngine::Output& out,
 
 // ── Rand (uniform [from, to)) ────────────────────────────────────────────
 
-void RandCPU(const Tensor& dst, double from, double to,
-             const Generator& gen) {
+void RandCPU(const Tensor& dst, double from, double to, const Generator& gen) {
     ZT_CHECK(zt::isFloatingType(dst.scalar_type()),
              "Rand: expected floating-point dtype, got {}",
              zt::toString(dst.scalar_type()));
@@ -110,8 +114,7 @@ void RandCPU(const Tensor& dst, double from, double to,
             core::Indexer indexer({dst}, dst, core::DtypePolicy::NONE);
             core::ParallelFor(
                 dst.device(), indexer.NumWorkloads(), [=](int64_t i) {
-                    PhiloxEngine eng(seed,
-                                     base_ctr + static_cast<uint64_t>(i));
+                    PhiloxEngine eng(seed, base_ctr + static_cast<uint64_t>(i));
                     PhiloxEngine::Output out;
                     eng(out);
                     *indexer.GetOutputPtr<scalar_t>(i) =
@@ -123,7 +126,9 @@ void RandCPU(const Tensor& dst, double from, double to,
 
 // ── RandN (normal) ───────────────────────────────────────────────────────
 
-void RandNCPU(const Tensor& dst, double mean, double stddev,
+void RandNCPU(const Tensor& dst,
+              double mean,
+              double stddev,
               const Generator& gen) {
     ZT_CHECK(zt::isFloatingType(dst.scalar_type()),
              "RandN: expected floating-point dtype, got {}",
@@ -155,14 +160,12 @@ void RandNCPU(const Tensor& dst, double mean, double stddev,
                     PhiloxEngine::Output out2;
                     eng2(out2);
                     if constexpr (std::is_same_v<scalar_t, double>) {
-                        double du1 =
-                            philox_uniform_double_u64(out[0], out[1]);
+                        double du1 = philox_uniform_double_u64(out[0], out[1]);
                         double du2 =
                             philox_uniform_double_u64(out2[0], out2[1]);
                         double dn1, dn2;
                         philox_box_muller_double(du1, du2, dn1, dn2);
-                        base[i0] =
-                            static_cast<scalar_t>(mean + dn1 * stddev);
+                        base[i0] = static_cast<scalar_t>(mean + dn1 * stddev);
                     } else {
                         float u1 = philox_uniform_float_u32(out[0]);
                         float u2 = philox_uniform_float_u32(out2[0]);
@@ -183,8 +186,8 @@ void RandNCPU(const Tensor& dst, double mean, double stddev,
                     auto* p0 = indexer.GetOutputPtr<scalar_t>(i);
                     if (i + 1 < n) {
                         auto* p1 = indexer.GetOutputPtr<scalar_t>(i + 1);
-                        NormalSamplePair<scalar_t>(p0, p1, ctr, seed,
-                                                   mean, stddev);
+                        NormalSamplePair<scalar_t>(
+                            p0, p1, ctr, seed, mean, stddev);
                     } else {
                         PhiloxEngine eng(seed, ctr);
                         PhiloxEngine::Output out;
@@ -193,14 +196,13 @@ void RandNCPU(const Tensor& dst, double mean, double stddev,
                         PhiloxEngine::Output out2;
                         eng2(out2);
                         if constexpr (std::is_same_v<scalar_t, double>) {
-                            double du1 = philox_uniform_double_u64(
-                                out[0], out[1]);
-                            double du2 = philox_uniform_double_u64(
-                                out2[0], out2[1]);
+                            double du1 =
+                                philox_uniform_double_u64(out[0], out[1]);
+                            double du2 =
+                                philox_uniform_double_u64(out2[0], out2[1]);
                             double dn1, dn2;
                             philox_box_muller_double(du1, du2, dn1, dn2);
-                            *p0 = static_cast<scalar_t>(mean +
-                                                        dn1 * stddev);
+                            *p0 = static_cast<scalar_t>(mean + dn1 * stddev);
                         } else {
                             float u1 = philox_uniform_float_u32(out[0]);
                             float u2 = philox_uniform_float_u32(out2[0]);
@@ -218,7 +220,9 @@ void RandNCPU(const Tensor& dst, double mean, double stddev,
 
 // ── RandInt ──────────────────────────────────────────────────────────────
 
-void RandIntCPU(const Tensor& dst, int64_t low, int64_t high,
+void RandIntCPU(const Tensor& dst,
+                int64_t low,
+                int64_t high,
                 const Generator& gen) {
     ZT_CHECK(high > low, "RandInt: high ({}) must be > low ({})", high, low);
     ZT_CHECK(zt::isIntegralType(dst.scalar_type()) ||
@@ -245,8 +249,7 @@ void RandIntCPU(const Tensor& dst, int64_t low, int64_t high,
             core::Indexer indexer({dst}, dst, core::DtypePolicy::NONE);
             core::ParallelFor(
                 dst.device(), indexer.NumWorkloads(), [=](int64_t i) {
-                    PhiloxEngine eng(seed,
-                                     base_ctr + static_cast<uint64_t>(i));
+                    PhiloxEngine eng(seed, base_ctr + static_cast<uint64_t>(i));
                     PhiloxEngine::Output out;
                     eng(out);
                     *indexer.GetOutputPtr<scalar_t>(i) =

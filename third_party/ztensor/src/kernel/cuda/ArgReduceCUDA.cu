@@ -8,6 +8,7 @@
 // float/int32 dtypes (with host-precomputed flat indices).
 
 #include "ztensor/zt/cuda/Guard.h"
+
 #include "kernel/ArgReduce.h"
 
 namespace zt {

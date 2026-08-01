@@ -34,13 +34,12 @@ void TernaryEWCPU(const Tensor& cond,
 
     ZT_DISPATCH_SCALARTYPE_TO_TEMPLATE(a.scalar_type(), [&] {
         core::Indexer indexer({cond, a, b}, dst, core::DtypePolicy::NONE);
-        core::ParallelFor(
-            dst.device(), indexer.NumWorkloads(), [&](int64_t i) {
-                const bool c = *indexer.GetInputPtr<bool>(0, i);
-                const scalar_t va = *indexer.GetInputPtr<scalar_t>(1, i);
-                const scalar_t vb = *indexer.GetInputPtr<scalar_t>(2, i);
-                *indexer.GetOutputPtr<scalar_t>(i) = c ? va : vb;
-            });
+        core::ParallelFor(dst.device(), indexer.NumWorkloads(), [&](int64_t i) {
+            const bool c = *indexer.GetInputPtr<bool>(0, i);
+            const scalar_t va = *indexer.GetInputPtr<scalar_t>(1, i);
+            const scalar_t vb = *indexer.GetInputPtr<scalar_t>(2, i);
+            *indexer.GetOutputPtr<scalar_t>(i) = c ? va : vb;
+        });
     });
 }
 

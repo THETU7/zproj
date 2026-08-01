@@ -10,11 +10,11 @@
 // Non-atomic: duplicate indices in IndexSet give last-writer-wins (matches
 // PyTorch index_put_). See DESIGN.md phase-5 notes.
 
+#include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/Macros.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/AdvancedIndexing.h"
-#include "ztensor/zt/Macros.h"
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/ParallelFor.h"
 #include "kernel/Index.h"
@@ -68,7 +68,8 @@ void index_add_typed(const core::AdvancedIndexer& ai) {
         ai.GetDevice(), ai.NumWorkloads(), [=] __device__(int64_t i) {
             const scalar_t v =
                 *reinterpret_cast<const scalar_t*>(ai.GetInputPtr(i));
-            index_atomic_add(reinterpret_cast<scalar_t*>(ai.GetOutputPtr(i)), v);
+            index_atomic_add(reinterpret_cast<scalar_t*>(ai.GetOutputPtr(i)),
+                             v);
         });
 }
 

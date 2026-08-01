@@ -18,31 +18,43 @@
 namespace zt::kernel {
 
 /// Fill `dst` with uniform [from, to) samples. Floating-point dtypes only.
-void Rand(const Tensor& dst, double from, double to,
+void Rand(const Tensor& dst,
+          double from,
+          double to,
           const Generator& gen = Generator());
 
 /// Fill `dst` with standard-normal samples. Floating-point dtypes only.
-void RandN(const Tensor& dst, double mean, double stddev,
+void RandN(const Tensor& dst,
+           double mean,
+           double stddev,
            const Generator& gen = Generator());
 
 /// Fill `dst` with uniform integers in [low, high). Integer/Bool dtypes only.
-void RandInt(const Tensor& dst, int64_t low, int64_t high,
+void RandInt(const Tensor& dst,
+             int64_t low,
+             int64_t high,
              const Generator& gen = Generator());
 
 // ── In-place convenience aliases ─────────────────────────────────────────
 // These are the same as Rand/RandN/RandInt with explicit output.
 
-inline void Uniform_(const Tensor& dst, double from, double to,
+inline void Uniform_(const Tensor& dst,
+                     double from,
+                     double to,
                      const Generator& gen = Generator()) {
     Rand(dst, from, to, gen);
 }
 
-inline void Normal_(const Tensor& dst, double mean, double stddev,
+inline void Normal_(const Tensor& dst,
+                    double mean,
+                    double stddev,
                     const Generator& gen = Generator()) {
     RandN(dst, mean, stddev, gen);
 }
 
-inline void Random_(const Tensor& dst, int64_t from, int64_t to,
+inline void Random_(const Tensor& dst,
+                    int64_t from,
+                    int64_t to,
                     const Generator& gen = Generator()) {
     RandInt(dst, from, to, gen);
 }
@@ -50,16 +62,24 @@ inline void Random_(const Tensor& dst, int64_t from, int64_t to,
 // ── CPU / CUDA back-ends (exposed for testing and the device dispatcher) ─
 
 void RandCPU(const Tensor& dst, double from, double to, const Generator& gen);
-void RandNCPU(const Tensor& dst, double mean, double stddev,
+void RandNCPU(const Tensor& dst,
+              double mean,
+              double stddev,
               const Generator& gen);
-void RandIntCPU(const Tensor& dst, int64_t low, int64_t high,
+void RandIntCPU(const Tensor& dst,
+                int64_t low,
+                int64_t high,
                 const Generator& gen);
 
 #ifdef BUILD_CUDA_MODULE
 void RandCUDA(const Tensor& dst, double from, double to, const Generator& gen);
-void RandNCUDA(const Tensor& dst, double mean, double stddev,
+void RandNCUDA(const Tensor& dst,
+               double mean,
+               double stddev,
                const Generator& gen);
-void RandIntCUDA(const Tensor& dst, int64_t low, int64_t high,
+void RandIntCUDA(const Tensor& dst,
+                 int64_t low,
+                 int64_t high,
                  const Generator& gen);
 #endif
 

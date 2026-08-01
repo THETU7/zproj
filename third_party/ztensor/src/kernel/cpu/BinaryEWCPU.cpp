@@ -30,8 +30,7 @@ inline bool is_comparison(BinaryEWOpCode op) noexcept {
 }
 
 inline bool is_logical(BinaryEWOpCode op) noexcept {
-    return op >= BinaryEWOpCode::LogicalAnd &&
-           op <= BinaryEWOpCode::LogicalXor;
+    return op >= BinaryEWOpCode::LogicalAnd && op <= BinaryEWOpCode::LogicalXor;
 }
 
 inline bool is_bitwise(BinaryEWOpCode op) noexcept {
@@ -40,20 +39,20 @@ inline bool is_bitwise(BinaryEWOpCode op) noexcept {
 
 // ── Bitwise helper: only integral T gets real operators ────────────────────
 
-template <typename T, bool Integral = std::is_integral_v<T>>
+template<typename T, bool Integral = std::is_integral_v<T>>
 struct BitwiseOps {
     static T and_(T a, T b) { return static_cast<T>(a & b); }
-    static T or_(T a, T b)  { return static_cast<T>(a | b); }
+    static T or_(T a, T b) { return static_cast<T>(a | b); }
     static T xor_(T a, T b) { return static_cast<T>(a ^ b); }
     static T lshift(T a, T b) { return static_cast<T>(a << b); }
     static T rshift(T a, T b) { return static_cast<T>(a >> b); }
 };
 
 // Float / Half / BFloat16 — never called (rejected at runtime).
-template <typename T>
+template<typename T>
 struct BitwiseOps<T, false> {
     static T and_(T a, T) { return a; }
-    static T or_(T a, T)  { return a; }
+    static T or_(T a, T) { return a; }
     static T xor_(T a, T) { return a; }
     static T lshift(T a, T) { return a; }
     static T rshift(T a, T) { return a; }
@@ -61,10 +60,10 @@ struct BitwiseOps<T, false> {
 
 // ── Functor tables ─────────────────────────────────────────────────────────
 
-template <typename T>
+template<typename T>
 using ArithFn = T (*)(T, T);
 
-template <typename T>
+template<typename T>
 ArithFn<T> select_arith_fn(BinaryEWOpCode op) {
     switch (op) {
         case BinaryEWOpCode::Add:
@@ -87,9 +86,8 @@ ArithFn<T> select_arith_fn(BinaryEWOpCode op) {
             };
         case BinaryEWOpCode::Remainder:
             return +[](T a, T b) {
-                return static_cast<T>(
-                    std::remainder(static_cast<float>(a),
-                                   static_cast<float>(b)));
+                return static_cast<T>(std::remainder(static_cast<float>(a),
+                                                     static_cast<float>(b)));
             };
         case BinaryEWOpCode::Maximum:
             return +[](T a, T b) { return a > b ? a : b; };
@@ -122,10 +120,10 @@ ArithFn<T> select_arith_fn(BinaryEWOpCode op) {
                  static_cast<int>(op));
 }
 
-template <typename T>
+template<typename T>
 using BoolFn = bool (*)(T, T);
 
-template <typename T>
+template<typename T>
 BoolFn<T> select_cmp_fn(BinaryEWOpCode op) {
     switch (op) {
         case BinaryEWOpCode::Eq:
@@ -147,7 +145,7 @@ BoolFn<T> select_cmp_fn(BinaryEWOpCode op) {
                  static_cast<int>(op));
 }
 
-template <typename T>
+template<typename T>
 BoolFn<T> select_logical_fn(BinaryEWOpCode op) {
     switch (op) {
         case BinaryEWOpCode::LogicalAnd:
@@ -228,12 +226,11 @@ void BinaryEWCPU(const Tensor& lhs,
     ZT_DISPATCH_SCALARTYPE_TO_TEMPLATE(lhs.scalar_type(), [&] {
         const auto f = select_arith_fn<scalar_t>(op);
         core::Indexer indexer({lhs, rhs}, dst, core::DtypePolicy::ALL_SAME);
-        core::ParallelFor(
-            dst.device(), indexer.NumWorkloads(), [&](int64_t i) {
-                *indexer.GetOutputPtr<scalar_t>(i) =
-                    f(*indexer.GetInputPtr<scalar_t>(0, i),
-                      *indexer.GetInputPtr<scalar_t>(1, i));
-            });
+        core::ParallelFor(dst.device(), indexer.NumWorkloads(), [&](int64_t i) {
+            *indexer.GetOutputPtr<scalar_t>(i) =
+                f(*indexer.GetInputPtr<scalar_t>(0, i),
+                  *indexer.GetInputPtr<scalar_t>(1, i));
+        });
     });
 }
 

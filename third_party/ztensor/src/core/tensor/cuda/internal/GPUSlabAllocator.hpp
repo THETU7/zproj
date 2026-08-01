@@ -19,15 +19,13 @@
 // Modeled on LichtFeld-Studio's GPUSlabAllocator.
 //
 // This header is visible only when BUILD_CUDA_MODULE is enabled
-// (same guard discipline as CUDAUtils.h / CUDAEventPool.h).
+// (same guard discipline as the public zt/cuda/{Exception,Guard,Stream}.h).
 
 #pragma once
 
 #ifdef BUILD_CUDA_MODULE
 
 #include <cuda_runtime.h>
-
-#include "core/cuda/CUDAEventPool.h"  // bridgeStreams
 
 #include <array>
 #include <atomic>
@@ -39,19 +37,22 @@
 
 #include "ztensor/zt/utility/Log.h"
 
+#include "core/cuda/CUDAEventPool.h"  // bridgeStreams
+
 namespace zt {
 
-// ── GPUSlabAllocator ───────────────────────────────────────────────────────────
+// ── GPUSlabAllocator
+// ───────────────────────────────────────────────────────────
 
 class GPUSlabAllocator {
 public:
     static constexpr size_t MIN_BLOCK_SIZE = 256;
-    static constexpr size_t MAX_BLOCK_SIZE = 256 * 1024;         // 256 KiB
-    static constexpr size_t NUM_SIZE_CLASSES = 11;               // 256B … 256KiB
-    static constexpr size_t MIN_SLAB_SIZE = 256 * 1024;          // 256 KiB
-    static constexpr size_t MAX_SLAB_SIZE = 8 * 1024 * 1024;     // 8 MiB
+    static constexpr size_t MAX_BLOCK_SIZE = 256 * 1024;      // 256 KiB
+    static constexpr size_t NUM_SIZE_CLASSES = 11;            // 256B … 256KiB
+    static constexpr size_t MIN_SLAB_SIZE = 256 * 1024;       // 256 KiB
+    static constexpr size_t MAX_SLAB_SIZE = 8 * 1024 * 1024;  // 8 MiB
     static constexpr size_t TARGET_BLOCKS_PER_SLAB = 1024;
-    static constexpr size_t MAX_BLOCKS_PER_CLASS = 512 * 1024;   // tracked cap
+    static constexpr size_t MAX_BLOCKS_PER_CLASS = 512 * 1024;  // tracked cap
 
     struct Stats {
         std::atomic<uint64_t> alloc_count{0};
@@ -64,7 +65,8 @@ public:
 
     static GPUSlabAllocator& instance();
 
-    // ── Lifecycle ──────────────────────────────────────────────────────────────
+    // ── Lifecycle
+    // ──────────────────────────────────────────────────────────────
 
     void shutdown() {
         bool expected = false;
@@ -73,7 +75,8 @@ public:
         cleanup();
     }
 
-    // ── Size-class helpers ─────────────────────────────────────────────────────
+    // ── Size-class helpers
+    // ─────────────────────────────────────────────────────
 
     static size_t get_size_class(size_t bytes) {
         if (bytes <= MIN_BLOCK_SIZE) return 0;
@@ -95,15 +98,16 @@ public:
         const size_t target_bytes = block_size * TARGET_BLOCKS_PER_SLAB;
         const size_t slab_size =
             std::min(std::max(target_bytes, MIN_SLAB_SIZE), MAX_SLAB_SIZE);
-        return (slab_size / block_size) * block_size;  // round down to block multiple
+        return (slab_size / block_size) *
+               block_size;  // round down to block multiple
     }
 
-    // ── Allocation / deallocation ──────────────────────────────────────────────
+    // ── Allocation / deallocation
+    // ──────────────────────────────────────────────
 
     // Returns nullptr on miss (caller falls through to next tier).
     void* allocate(size_t bytes, cudaStream_t stream = nullptr) {
-        if (!enabled_.load(std::memory_order_acquire) ||
-            bytes == 0 ||
+        if (!enabled_.load(std::memory_order_acquire) || bytes == 0 ||
             bytes > MAX_BLOCK_SIZE) {
             return nullptr;
         }
@@ -141,7 +145,8 @@ public:
         stats_.free_count.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // ── Pointer ownership ─────────────────────────────────────────────────────
+    // ── Pointer ownership
+    // ─────────────────────────────────────────────────────
 
     bool owns_pointer(void* ptr) const {
         if (!ptr) return false;
@@ -156,7 +161,8 @@ public:
         return false;
     }
 
-    // ── Stream re-tagging ─────────────────────────────────────────────────────
+    // ── Stream re-tagging
+    // ─────────────────────────────────────────────────────
 
     // Move `stream`'s free-list entries to the virgin list.  Caller must have
     // synchronised the stream (or device) first.
@@ -183,11 +189,10 @@ public:
         }
     }
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // ── State
+    // ─────────────────────────────────────────────────────────────────
 
-    bool is_enabled() const {
-        return enabled_.load(std::memory_order_acquire);
-    }
+    bool is_enabled() const { return enabled_.load(std::memory_order_acquire); }
 
     const Stats& stats() const { return stats_; }
 
@@ -214,7 +219,8 @@ public:
     GPUSlabAllocator& operator=(const GPUSlabAllocator&) = delete;
 
 private:
-    // ── Internal structures ───────────────────────────────────────────────────
+    // ── Internal structures
+    // ───────────────────────────────────────────────────
 
     struct Slab {
         void* base = nullptr;
@@ -229,7 +235,8 @@ private:
         std::atomic<size_t> count{0};
     };
 
-    // ── Construction ──────────────────────────────────────────────────────────
+    // ── Construction
+    // ──────────────────────────────────────────────────────────
 
     GPUSlabAllocator() {
         int device_count = 0;
@@ -264,8 +271,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(free_lists_[size_class].mutex);
             for (size_t i = 0; i < num_blocks; ++i) {
-                void* block =
-                    static_cast<char*>(slab_base) + i * block_size;
+                void* block = static_cast<char*>(slab_base) + i * block_size;
                 free_lists_[size_class].virgin.push_back(block);
             }
             free_lists_[size_class].count.fetch_add(num_blocks,
@@ -301,7 +307,8 @@ private:
         stats_.total_slab_memory = 0;
     }
 
-    // ── Block-level operations ────────────────────────────────────────────────
+    // ── Block-level operations
+    // ────────────────────────────────────────────────
 
     void* pop_block(size_t size_class, cudaStream_t stream) {
         FreeLists& lists = free_lists_[size_class];
@@ -340,7 +347,8 @@ private:
         lists.count.fetch_add(1, std::memory_order_release);
     }
 
-    // ── Data members ──────────────────────────────────────────────────────────
+    // ── Data members
+    // ──────────────────────────────────────────────────────────
 
     std::array<FreeLists, NUM_SIZE_CLASSES> free_lists_;
     std::vector<Slab> slabs_;
@@ -350,7 +358,8 @@ private:
     std::atomic<bool> shutdown_{false};
 };
 
-// ── Singleton accessor (out-of-line inline) ────────────────────────────────────
+// ── Singleton accessor (out-of-line inline)
+// ────────────────────────────────────
 
 inline GPUSlabAllocator& GPUSlabAllocator::instance() {
     static GPUSlabAllocator allocator;

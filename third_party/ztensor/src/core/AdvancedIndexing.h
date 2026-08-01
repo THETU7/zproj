@@ -30,9 +30,9 @@
 #include <utility>
 #include <vector>
 
+#include "ztensor/zt/Macros.h"
 #include "ztensor/zt/Tensor.h"
 
-#include "ztensor/zt/Macros.h"
 #include "core/Indexer.h"
 
 namespace zt::core {

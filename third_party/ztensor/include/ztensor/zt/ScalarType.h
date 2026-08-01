@@ -22,16 +22,16 @@ struct BFloat16;
 // ScalarType ordering is preserved so that future expansion is painless.
 enum class ScalarType : int8_t {
     Undefined = 0,
-    Byte,    // uint8_t
-    Char,    // int8_t
-    Short,   // int16_t
-    Int,     // int32_t
-    Long,    // int64_t
-    Half,    // 16-bit float
-    BFloat16, // brain float 16
-    Float,   // float
-    Double,  // double
-    Bool,    // bool
+    Byte,      // uint8_t
+    Char,      // int8_t
+    Short,     // int16_t
+    Int,       // int32_t
+    Long,      // int64_t
+    Half,      // 16-bit float
+    BFloat16,  // brain float 16
+    Float,     // float
+    Double,    // double
+    Bool,      // bool
     NumScalarTypes,
 };
 

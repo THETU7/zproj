@@ -129,8 +129,10 @@ public:
     // Implicit converting constructors from the tag constants, so that
     // `zt::Ellipsis` / `zt::NewAxis` can be placed directly in a key list
     // (e.g. `{zt::Ellipsis, zt::NewAxis}`). Deliberately non-explicit.
-    TensorKey(EllipsisTag) : impl_(EllipsisTag{}) {}  // NOLINT(google-explicit-constructor)
-    TensorKey(NewAxisTag) : impl_(NewAxisTag{}) {}  // NOLINT(google-explicit-constructor)
+    TensorKey(EllipsisTag)
+        : impl_(EllipsisTag{}) {}  // NOLINT(google-explicit-constructor)
+    TensorKey(NewAxisTag)
+        : impl_(NewAxisTag{}) {}  // NOLINT(google-explicit-constructor)
 
     // ---- queries ----
     Mode mode() const { return static_cast<Mode>(impl_.index()); }

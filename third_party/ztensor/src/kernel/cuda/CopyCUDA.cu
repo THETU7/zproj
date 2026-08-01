@@ -9,9 +9,9 @@
 // a contiguous same-dtype buffer of src on the device and casts in place, so
 // this kernel only ever sees both operands on the same (CUDA) device.
 
+#include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"

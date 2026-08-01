@@ -7,6 +7,7 @@
 // Future optimization: use CUB DeviceScan for contiguous dim=-1 scans.
 
 #include "ztensor/zt/cuda/Guard.h"
+
 #include "kernel/Scan.h"
 
 namespace zt {

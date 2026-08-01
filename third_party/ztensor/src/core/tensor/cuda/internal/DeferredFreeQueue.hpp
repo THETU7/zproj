@@ -5,15 +5,15 @@
 // periodically invoke process() which polls cudaEventQuery and releases blocks
 // whose GPU work has completed.
 //
-// This is NOT the primary reuse path — slab and bucketed pools reuse immediately
-// via stream-tag + bridgeStreams (no polling).  DeferredFreeQueue is only for
-// cleaning up cudaMallocAsync'd blocks that were evicted from the cache or
-// bypassed the pool, so the driver memory pool can reclaim them.
+// This is NOT the primary reuse path — slab and bucketed pools reuse
+// immediately via stream-tag + bridgeStreams (no polling).  DeferredFreeQueue
+// is only for cleaning up cudaMallocAsync'd blocks that were evicted from the
+// cache or bypassed the pool, so the driver memory pool can reclaim them.
 //
 // Modeled on LichtFeld-Studio's DeferredFreeQueue.
 //
 // This header is visible only when BUILD_CUDA_MODULE is enabled
-// (same guard discipline as CUDAUtils.h / CUDAEventPool.h).
+// (same guard discipline as the public zt/cuda/{Exception,Guard,Stream}.h).
 
 #pragma once
 
@@ -21,17 +21,18 @@
 
 #include <cuda_runtime.h>
 
-#include "core/cuda/CUDAEventPool.h"
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <vector>
 
+#include "core/cuda/CUDAEventPool.h"
+
 namespace zt {
 
-// ── DeferredFreeQueue ──────────────────────────────────────────────────────────
+// ── DeferredFreeQueue
+// ──────────────────────────────────────────────────────────
 
 class DeferredFreeQueue {
 public:
@@ -40,7 +41,8 @@ public:
 
     // Callback invoked when a deferred block is ready to be freed.
     // ptr  — the memory block (allocated via cudaMallocAsync or cudaMalloc).
-    // size — size in bytes (for stats; the callback itself decides how to free).
+    // size — size in bytes (for stats; the callback itself decides how to
+    // free).
     using FreeCallback = void (*)(void* ptr, size_t size);
 
     static DeferredFreeQueue& instance();
@@ -66,7 +68,8 @@ public:
     // CAS-guarded; subsequent calls are no-ops.
     void shutdown();
 
-    // ── Statistics ─────────────────────────────────────────────────────────────
+    // ── Statistics
+    // ─────────────────────────────────────────────────────────────
 
     struct Stats {
         std::atomic<uint64_t> queued_count{0};
@@ -102,7 +105,8 @@ private:
     Stats stats_;
 };
 
-// ── Inline definitions ─────────────────────────────────────────────────────────
+// ── Inline definitions
+// ─────────────────────────────────────────────────────────
 
 inline DeferredFreeQueue& DeferredFreeQueue::instance() {
     static DeferredFreeQueue queue;

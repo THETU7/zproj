@@ -13,7 +13,7 @@
 namespace zt::kernel {
 namespace {
 
-template <typename T>
+template<typename T>
 T scan_combine(ScanOpCode op, T acc, T v) {
     switch (op) {
         case ScanOpCode::CumSum:
@@ -28,9 +28,11 @@ T scan_combine(ScanOpCode op, T acc, T v) {
     return v;  // unreachable
 }
 
-template <typename scalar_t>
-void scan_cpu_typed(const Tensor& src, Tensor& dst, int64_t dim,
-                     ScanOpCode op) {
+template<typename scalar_t>
+void scan_cpu_typed(const Tensor& src,
+                    Tensor& dst,
+                    int64_t dim,
+                    ScanOpCode op) {
     const int64_t ndim = src.dim();
     const int64_t scan_len = src.size(dim);
     const int64_t num_rows = src.numel() / scan_len;
@@ -81,7 +83,9 @@ void scan_cpu_typed(const Tensor& src, Tensor& dst, int64_t dim,
 
 void ScanCPU(const Tensor& src, Tensor& dst, int64_t dim, ScanOpCode op) {
     const int64_t scan_len = src.size(dim);
-    if (scan_len <= 0) { return; }
+    if (scan_len <= 0) {
+        return;
+    }
 
     // Dispatch on dtype without the DISPATCH macro so we can use #pragma omp.
     const ScalarType dt = src.scalar_type();

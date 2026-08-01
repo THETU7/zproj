@@ -10,9 +10,9 @@
 
 #include <cuda_runtime.h>
 
+#include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"
@@ -29,8 +29,7 @@ __host__ __device__ inline bool is_comparison(BinaryEWOpCode op) noexcept {
 }
 
 __host__ __device__ inline bool is_logical(BinaryEWOpCode op) noexcept {
-    return op >= BinaryEWOpCode::LogicalAnd &&
-           op <= BinaryEWOpCode::LogicalXor;
+    return op >= BinaryEWOpCode::LogicalAnd && op <= BinaryEWOpCode::LogicalXor;
 }
 
 __host__ __device__ inline bool is_bitwise(BinaryEWOpCode op) noexcept {
@@ -39,7 +38,7 @@ __host__ __device__ inline bool is_bitwise(BinaryEWOpCode op) noexcept {
 
 // ── Per-element __device__ functors ────────────────────────────────────────
 
-template <typename T>
+template<typename T>
 __device__ T arith_element(BinaryEWOpCode op, T a, T b) {
     switch (op) {
         case BinaryEWOpCode::Add:
@@ -74,25 +73,30 @@ __device__ T arith_element(BinaryEWOpCode op, T a, T b) {
     }
 }
 
-template <typename T>
+template<typename T>
 __device__ T bitwise_element(BinaryEWOpCode op, T a, T b) {
     switch (op) {
         case BinaryEWOpCode::BitwiseAnd:
-            return static_cast<T>(static_cast<int64_t>(a) & static_cast<int64_t>(b));
+            return static_cast<T>(static_cast<int64_t>(a) &
+                                  static_cast<int64_t>(b));
         case BinaryEWOpCode::BitwiseOr:
-            return static_cast<T>(static_cast<int64_t>(a) | static_cast<int64_t>(b));
+            return static_cast<T>(static_cast<int64_t>(a) |
+                                  static_cast<int64_t>(b));
         case BinaryEWOpCode::BitwiseXor:
-            return static_cast<T>(static_cast<int64_t>(a) ^ static_cast<int64_t>(b));
+            return static_cast<T>(static_cast<int64_t>(a) ^
+                                  static_cast<int64_t>(b));
         case BinaryEWOpCode::Lshift:
-            return static_cast<T>(static_cast<int64_t>(a) << static_cast<int64_t>(b));
+            return static_cast<T>(static_cast<int64_t>(a)
+                                  << static_cast<int64_t>(b));
         case BinaryEWOpCode::Rshift:
-            return static_cast<T>(static_cast<int64_t>(a) >> static_cast<int64_t>(b));
+            return static_cast<T>(static_cast<int64_t>(a) >>
+                                  static_cast<int64_t>(b));
         default:
             return static_cast<T>(0);
     }
 }
 
-template <typename T>
+template<typename T>
 __device__ bool cmp_element(BinaryEWOpCode op, T a, T b) {
     switch (op) {
         case BinaryEWOpCode::Eq:
@@ -112,7 +116,7 @@ __device__ bool cmp_element(BinaryEWOpCode op, T a, T b) {
     }
 }
 
-template <typename T>
+template<typename T>
 __device__ bool logical_element(BinaryEWOpCode op, T a, T b) {
     switch (op) {
         case BinaryEWOpCode::LogicalAnd:

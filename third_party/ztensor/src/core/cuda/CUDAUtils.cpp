@@ -1,17 +1,16 @@
 // ztensor/core/CUDAUtils.cu
 //
-// Out-of-line definitions of the CUDA host-side helpers declared in
-// CUDAUtils.h. Compiled only under BUILD_CUDA_MODULE. Modeled on Open3D's
-// CUDAUtils.cpp.
+// Out-of-line definitions of the CUDA host-side helpers declared in the
+// public zt/cuda/Exception.h and zt/cuda/Guard.h. Compiled only under
+// BUILD_CUDA_MODULE. Modeled on Open3D's CUDAUtils.cpp.
 
 #include <stdexcept>
 #include <string>
 
-#include "ztensor/zt/Device.h"
-#include "ztensor/zt/utility/Log.h"
-
 #include "ztensor/zt/cuda/Exception.h"
 #include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/Device.h"
+#include "ztensor/zt/utility/Log.h"
 
 namespace zt {
 namespace cuda {

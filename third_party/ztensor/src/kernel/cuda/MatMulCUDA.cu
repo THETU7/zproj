@@ -30,11 +30,11 @@
 #include <cstdint>
 #include <unordered_map>
 
+#include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Stream.h"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "ztensor/zt/cuda/Guard.h"
-#include "ztensor/zt/cuda/Stream.h"
 #include "kernel/MatMul.h"
 
 namespace zt {
@@ -62,9 +62,10 @@ void check_supported_dtype(ScalarType dt) {
         dt == ScalarType::Half || dt == ScalarType::BFloat16) {
         return;
     }
-    ZT_LOG_ERROR("MatMulCUDA: unsupported dtype {} (only Float/Double/Half/"
-                 "BFloat16)",
-                 toString(dt));
+    ZT_LOG_ERROR(
+        "MatMulCUDA: unsupported dtype {} (only Float/Double/Half/"
+        "BFloat16)",
+        toString(dt));
 }
 
 // Translate a ztensor dtype to the cuBLAS data-type and compute-type pair.
