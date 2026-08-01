@@ -1,17 +1,20 @@
 // WGS84 geodetic -> ECEF speed test.
 //
-// Times the ztensor-backed zproj::crs::wgs84_to_ecef on a batch of points for
-// both backends and reports throughput:
-//   1. zproj CPU (ztensor, serial host loop)
-//   2. zproj CUDA (ztensor, device kernel) -- when a GPU is present
-//   3. GDAL/PROJ reference (EPSG:4326 -> EPSG:4978), on CPU
+// Times the ztensor-backed zproj::crs::wgs84_to_ecef on a batch of points and
+// reports throughput for:
+//   1. zproj CPU, single-threaded
+//   2. zproj CPU, OpenMP-parallel (the default library path when built with
+//      OpenMP)
+//   3. zproj CUDA, per-call cost (launch + kernel + device sync each call)
+//   4. zproj CUDA, sustained throughput (back-to-back launches, one sync)
+//   5. GDAL/PROJ reference (EPSG:4326 -> EPSG:4978), on CPU
 //
 // The timed call is the plain public API with a pre-allocated output, so the
 // measured cost is the transform itself: no per-call allocation/clone and no
-// H2D/D2H transfer inside the timed region. The CUDA iteration is
-// synchronized with the device so the reported time includes kernel
-// execution. After timing, outputs are cross-checked against the GDAL
-// reference (max |delta| in metres).
+// H2D/D2H transfer inside the timed region. A theoretical memory-bandwidth
+// floor is printed as a reference so you can tell whether the kernel is
+// memory- or compute-bound. After timing, outputs are cross-checked against
+// the GDAL reference (max |delta| in metres).
 //
 // Usage:
 //   ./build/default/bin/wgs84_to_ecef [points] [reps]
@@ -33,6 +36,10 @@
 #include <vector>
 
 #include <Eigen/Dense>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif  // _OPENMP
 
 #ifdef BUILD_CUDA_MODULE
 #include <cuda_runtime.h>
@@ -131,7 +138,7 @@ std::vector<Ecef> ToEcefVector(const zt::Tensor& t) {
 
 void PrintRow(const char* name, std::size_t n, double ms) {
     const double mpts = static_cast<double>(n) / ms / 1e3;
-    std::cout << "  " << std::left << std::setw(22) << name << std::right
+    std::cout << "  " << std::left << std::setw(26) << name << std::right
               << std::setw(12) << std::fixed << std::setprecision(3) << ms
               << std::setw(12) << std::setprecision(3) << mpts << '\n';
 }
@@ -148,6 +155,26 @@ std::string CudaDeviceName() {
         return "unknown";
     }
     return prop.name;
+}
+
+// Theoretical per-batch time (ms) if the kernel were purely memory-bound:
+// one pass moves 2 x 24 B per point (read Geodetic, write Ecef) at the
+// device's peak bandwidth. Approximate; real GDDR clocks vary.
+double MemFloorMs(std::size_t n) {
+    // CUDA 13 removed memoryClockRate/memoryBusWidth from cudaDeviceProp, so
+    // query the equivalent device attributes instead.
+    int clock_khz = 0;
+    int bus_bits = 0;
+    if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrMemoryClockRate, 0) !=
+            cudaSuccess ||
+        cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, 0) !=
+            cudaSuccess) {
+        return 0.0;
+    }
+    const double bw_bytes_s = 2.0 * static_cast<double>(clock_khz) * 1e3 *
+                              static_cast<double>(bus_bits) / 8.0;
+    const double bytes = 2.0 * 24.0 * static_cast<double>(n);
+    return bytes / bw_bytes_s * 1e3;
 }
 #endif  // BUILD_CUDA_MODULE
 
@@ -180,14 +207,33 @@ int main(int argc, char** argv) {
     std::cout << "WGS84 geodetic -> ECEF speed test\n";
     std::cout << "  points per batch : " << n << '\n';
     std::cout << "  CPU/CUDA reps    : " << reps << '\n';
-    std::cout << "  GDAL reference   : 1 pass\n\n";
+    std::cout << "  GDAL reference   : 1 pass\n";
+#ifdef _OPENMP
+    std::cout << "  CPU threads      : " << omp_get_max_threads()
+              << " (OpenMP)\n";
+#else
+    std::cout << "  CPU threads      : 1 (no OpenMP)\n";
+#endif  // _OPENMP
+    std::cout << '\n';
 
     const std::vector<Geodetic> pts = MakePoints(n);
     const zt::Tensor in = zt::from_blob(const_cast<Geodetic*>(pts.data()),
                                         {static_cast<int64_t>(n), 3},
                                         zt::dtype(zt::kDouble));
 
-    // ---- zproj CPU ----
+    // ---- zproj CPU, single-threaded: isolates the per-core cost ----
+    zt::Tensor cpu_out_1t = in.clone();
+    double cpu_1t_ms = 0.0;
+#ifdef _OPENMP
+    const int saved_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+#endif  // _OPENMP
+    cpu_1t_ms = BenchMs(reps, [&] { wgs84_to_ecef(in, cpu_out_1t); });
+#ifdef _OPENMP
+    omp_set_num_threads(saved_threads);
+#endif  // _OPENMP
+
+    // ---- zproj CPU, default (OpenMP-parallel when built with OpenMP) ----
     zt::Tensor cpu_out = in.clone();
     const double cpu_ms = BenchMs(reps, [&] { wgs84_to_ecef(in, cpu_out); });
 
@@ -199,10 +245,11 @@ int main(int argc, char** argv) {
         std::chrono::duration<double, std::milli>(g1 - g0).count();
 
     // ---- report ----
-    std::cout << "  " << std::left << std::setw(22) << "backend" << std::right
+    std::cout << "  " << std::left << std::setw(26) << "backend" << std::right
               << std::setw(12) << "ms/batch" << std::setw(12) << "Mpts/s"
               << '\n';
-    PrintRow("zproj CPU (ztensor)", n, cpu_ms);
+    PrintRow("zproj CPU (1 thread)", n, cpu_1t_ms);
+    PrintRow("zproj CPU (OpenMP)", n, cpu_ms);
     PrintRow("GDAL/PROJ (CPU ref)", n, gdal_ms);
 
     const std::vector<Ecef> cpu_ecef = ToEcefVector(cpu_out);
@@ -213,15 +260,38 @@ int main(int argc, char** argv) {
     if (HasCudaDevice()) {
         const zt::Tensor gpu_in = in.cuda();
         zt::Tensor gpu_out = gpu_in.clone();
-        const double cuda_ms = BenchMs(reps, [&] {
+
+        // Per-call cost: launch + kernel + a full device sync every iteration,
+        // i.e. what a synchronous consumer pays per API call.
+        const double cuda_call_ms = BenchMs(reps, [&] {
             wgs84_to_ecef(gpu_in, gpu_out);
             cudaDeviceSynchronize();
         });
 
+        // Sustained throughput: back-to-back launches with one sync at the
+        // end, amortizing launch/sync overhead to expose raw kernel time.
+        for (int i = 0; i < reps; ++i) {
+            wgs84_to_ecef(gpu_in, gpu_out);
+        }
+        cudaDeviceSynchronize();
+        const auto s0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < reps; ++i) {
+            wgs84_to_ecef(gpu_in, gpu_out);
+        }
+        cudaDeviceSynchronize();
+        const auto s1 = std::chrono::steady_clock::now();
+        const double cuda_sustained_ms =
+            std::chrono::duration<double, std::milli>(s1 - s0).count() / reps;
+
         std::cout << "\n  CUDA device: " << CudaDeviceName() << '\n';
-        PrintRow("zproj CUDA (ztensor)", n, cuda_ms);
-        std::cout << "  speedup vs zproj CPU : " << std::setprecision(2)
-                  << (cpu_ms / cuda_ms) << "x\n";
+        PrintRow("zproj CUDA (per-call sync)", n, cuda_call_ms);
+        PrintRow("zproj CUDA (sustained)", n, cuda_sustained_ms);
+        std::cout << "  speedup vs CPU OpenMP (per-call) : "
+                  << std::setprecision(2) << (cpu_ms / cuda_call_ms) << "x\n";
+        std::cout << "  speedup vs CPU OpenMP (sustained): "
+                  << (cpu_ms / cuda_sustained_ms) << "x\n";
+        std::cout << "  mem-bandwidth floor (approx)     : "
+                  << std::setprecision(3) << MemFloorMs(n) << " ms/batch\n";
 
         const std::vector<Ecef> gpu_ecef = ToEcefVector(gpu_out.cpu());
         std::cout << "\nmax |zproj CUDA - GDAL| = " << std::setprecision(6)

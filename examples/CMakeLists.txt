@@ -1,6 +1,14 @@
 # WGS84 geodetic -> ECEF speed test: zproj CPU/CUDA vs the GDAL/PROJ reference.
+# OpenMP is linked so the benchmark can toggle the CPU loop's thread count
+# (single-threaded vs parallel) and report it in the header.
 add_executable(wgs84_to_ecef wgs84_to_ecef/main.cpp)
-target_link_libraries(wgs84_to_ecef PRIVATE zproj GDAL::GDAL Eigen3::Eigen)
+target_link_libraries(wgs84_to_ecef
+    PRIVATE
+        zproj
+        GDAL::GDAL
+        Eigen3::Eigen
+        $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
+)
 
 # DISABLED: eigen_gpu validated Eigen's GPU Core + Tensor modules, which
 # needed the vendored master Eigen (now removed; the system Eigen has no
