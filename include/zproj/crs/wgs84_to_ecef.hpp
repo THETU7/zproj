@@ -5,23 +5,15 @@
 // CUDA headers or being compiled by nvcc.
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
-#include "zproj/crs/wgs84.hpp"
+#include "ztensor/zt/Tensor.h"
 
 namespace zproj::crs {
 
-// Transform an array of geodetic points to ECEF on the GPU.
-//
-// Convenience wrapper: it allocates device memory, copies the input to the
-// device, launches the kernel, synchronizes, and copies the result back.
-// Intended for ease of use / learning; for sustained throughput prefer
-// wgs84_to_ecef_device() with your own device buffers and streams.
-std::vector<Ecef> wgs84_to_ecef(const std::vector<Geodetic>& geodetic);
-
-// Launch the kernel on device-resident buffers (the default stream).
-// d_in and d_out must each hold at least `n` elements.
-void wgs84_to_ecef_device(const Geodetic* d_in, Ecef* d_out, std::size_t n);
+/**
+ * @brief transform points form geodetic to ecef
+ * @param in points in geodetic, required [N, 3]
+ * @param dst out points in ecef, can be empty or [N, 3]
+ */
+void wgs84_to_ecef(const zt::Tensor& in, zt::Tensor& dst);
 
 }  // namespace zproj::crs

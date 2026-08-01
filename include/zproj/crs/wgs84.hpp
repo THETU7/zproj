@@ -8,13 +8,9 @@
 
 #include <cmath>
 
-namespace zproj::crs {
+#include "ztensor/zt/Macros.h"
 
-#ifdef __CUDACC__
-#define ZPROJ_HD __host__ __device__
-#else
-#define ZPROJ_HD
-#endif
+namespace zproj::crs {
 
 // WGS84 reference ellipsoid (EPSG::7030 / WGS84).
 namespace wgs84 {
@@ -42,7 +38,7 @@ struct Ecef {
 };
 
 // Convert a single geodetic point to ECEF. Identical math on host and device.
-ZPROJ_HD inline Ecef to_ecef(const Geodetic& g) noexcept {
+ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
     using namespace wgs84;
     const double sin_lat = sin(g.lat);
     const double cos_lat = cos(g.lat);

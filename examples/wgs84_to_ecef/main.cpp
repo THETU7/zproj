@@ -86,30 +86,30 @@ double max_error(const std::vector<Ecef>& a, const std::vector<Ecef>& b) {
 }  // namespace
 
 int main() {
-    constexpr std::size_t n = 1'000'000;
-
-    const auto geo = make_points(n);
-    std::cout << "WGS84 geodetic -> ECEF, n = " << n << " points\n";
-
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto ref = wgs84_to_ecef_gdal(geo);
-    const auto t1 = std::chrono::steady_clock::now();
-    const auto gpu = wgs84_to_ecef(geo);
-    const auto t2 = std::chrono::steady_clock::now();
-
-    const double err = max_error(ref, gpu);
-    const double gdal_ms =
-        std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double cuda_ms =
-        std::chrono::duration<double, std::milli>(t2 - t1).count();
-
-    std::cout << "max |GDAL - CUDA|   = " << err << " m\n";
-    std::cout << "GDAL/PROJ (CPU)     = " << gdal_ms << " ms\n";
-    std::cout << "zproj CUDA (GPU)    = " << cuda_ms
-              << " ms  (incl. H2D/D2H + sync)\n";
-    if (cuda_ms > 0.0) {
-        std::cout << "speedup             = " << (gdal_ms / cuda_ms) << "x\n";
-    }
+    // constexpr std::size_t n = 1'000'000;
+    //
+    // const auto geo = make_points(n);
+    // std::cout << "WGS84 geodetic -> ECEF, n = " << n << " points\n";
+    //
+    // const auto t0 = std::chrono::steady_clock::now();
+    // const auto ref = wgs84_to_ecef_gdal(geo);
+    // const auto t1 = std::chrono::steady_clock::now();
+    // const auto gpu = wgs84_to_ecef(geo);
+    // const auto t2 = std::chrono::steady_clock::now();
+    //
+    // const double err = max_error(ref, gpu);
+    // const double gdal_ms =
+    //     std::chrono::duration<double, std::milli>(t1 - t0).count();
+    // const double cuda_ms =
+    //     std::chrono::duration<double, std::milli>(t2 - t1).count();
+    //
+    // std::cout << "max |GDAL - CUDA|   = " << err << " m\n";
+    // std::cout << "GDAL/PROJ (CPU)     = " << gdal_ms << " ms\n";
+    // std::cout << "zproj CUDA (GPU)    = " << cuda_ms
+    //           << " ms  (incl. H2D/D2H + sync)\n";
+    // if (cuda_ms > 0.0) {
+    //     std::cout << "speedup             = " << (gdal_ms / cuda_ms) << "x\n";
+    // }
 
     return 0;
 }
