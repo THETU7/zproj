@@ -1,5 +1,6 @@
-# add_executable(wgs84_to_ecef wgs84_to_ecef/main.cpp)
-# target_link_libraries(wgs84_to_ecef PRIVATE zproj GDAL::GDAL Eigen3::Eigen)
+# WGS84 geodetic -> ECEF speed test: zproj CPU/CUDA vs the GDAL/PROJ reference.
+add_executable(wgs84_to_ecef wgs84_to_ecef/main.cpp)
+target_link_libraries(wgs84_to_ecef PRIVATE zproj GDAL::GDAL Eigen3::Eigen)
 
 # DISABLED: eigen_gpu validated Eigen's GPU Core + Tensor modules, which
 # needed the vendored master Eigen (now removed; the system Eigen has no
