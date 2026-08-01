@@ -32,7 +32,7 @@
 
 #include "ztensor/zt/Tensor.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/Macros.h"
 #include "core/Indexer.h"
 
 namespace zt::core {

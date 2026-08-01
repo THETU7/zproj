@@ -17,7 +17,7 @@
 #include "ztensor/zt/Half.h"
 #include "ztensor/zt/Scalar.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"

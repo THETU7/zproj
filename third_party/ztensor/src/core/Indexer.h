@@ -29,7 +29,7 @@
 #include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/Macros.h"
 
 namespace zt::core {
 

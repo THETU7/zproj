@@ -7,7 +7,7 @@
 // A future optimization can add a 32-bit packed CAS atomic path for
 // float/int32 dtypes (with host-precomputed flat indices).
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "kernel/ArgReduce.h"
 
 namespace zt {

@@ -11,7 +11,7 @@
 #include "ztensor/zt/Tensor.h"
 
 #include "core/cuda/CudaMemoryPool.h"
-#include "core/cuda/CUDAStreamContext.h"  // GetCurrentStream
+#include "ztensor/zt/cuda/Stream.h"  // GetCurrentStream
 
 namespace zt {
 

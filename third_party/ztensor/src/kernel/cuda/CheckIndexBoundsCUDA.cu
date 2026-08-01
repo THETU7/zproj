@@ -14,7 +14,7 @@
 #include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "core/cuda/CUDAUtils.h"  // CUDAScopedDevice
+#include "ztensor/zt/cuda/Guard.h"
 #include "core/ParallelFor.h"
 #include "kernel/CheckIndexBounds.h"
 

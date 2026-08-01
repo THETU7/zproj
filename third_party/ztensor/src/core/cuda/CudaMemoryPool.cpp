@@ -12,8 +12,9 @@
 #include "core/cuda/CudaMemoryPool.h"
 
 #include "core/cuda/CUDAEventPool.h"          // bridgeStreams
-#include "core/cuda/CUDAStreamContext.h"      // GetCurrentStream
-#include "core/cuda/CUDAUtils.h"             // ZT_CUDA_CHECK, CUDAScopedDevice
+#include "ztensor/zt/cuda/Stream.h"      // GetCurrentStream
+#include "ztensor/zt/cuda/Exception.h"   // ZT_CUDA_CHECK
+#include "ztensor/zt/cuda/Guard.h"       // CUDAScopedDevice
 #include "core/tensor/cuda/internal/DeferredFreeQueue.hpp"
 #include "core/tensor/cuda/internal/GPUSlabAllocator.hpp"
 #include "core/tensor/cuda/internal/SizeBucketedPool.hpp"

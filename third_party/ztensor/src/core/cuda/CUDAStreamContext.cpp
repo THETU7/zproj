@@ -4,7 +4,7 @@
 // CUDAStreamContext.h.  Compiled only under BUILD_CUDA_MODULE (NVCC).
 
 #include "core/cuda/CUDAEventPool.h"
-#include "core/cuda/CUDAStreamContext.h"
+#include "ztensor/zt/cuda/Stream.h"
 
 namespace zt {
 namespace cuda {

@@ -33,7 +33,8 @@
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Stream.h"
 #include "kernel/MatMul.h"
 
 namespace zt {

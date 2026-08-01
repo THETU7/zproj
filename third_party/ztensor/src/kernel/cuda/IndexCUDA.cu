@@ -13,7 +13,8 @@
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/AdvancedIndexing.h"
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/Macros.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/ParallelFor.h"
 #include "kernel/Index.h"

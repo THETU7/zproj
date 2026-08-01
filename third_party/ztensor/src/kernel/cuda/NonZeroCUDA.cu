@@ -21,7 +21,7 @@
 #include "ztensor/zt/TensorFactories.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "core/Indexer.h"
 #include "core/ParallelFor.h"
 #include "kernel/NonZero.h"

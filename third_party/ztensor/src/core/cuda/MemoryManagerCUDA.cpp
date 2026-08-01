@@ -13,7 +13,9 @@
 #include <cstddef>
 
 #include "core/cuda/CudaMemoryPool.h"  // CudaMemoryPool::instance()
-#include "core/cuda/CUDAUtils.h"  // cuda::GetStream, CUDAScopedDevice, ZT_CUDA_CHECK
+#include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK
+#include "ztensor/zt/cuda/Guard.h"  // CUDAScopedDevice
+#include "ztensor/zt/cuda/Stream.h"  // cuda::GetStream
 
 namespace zt {
 namespace {

@@ -17,7 +17,7 @@
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/AdvancedIndexing.h"  // ADV_INDEX_MAX_DIMS
-#include "core/cuda/CUDAUtils.h"    // CUDAScopedDevice
+#include "ztensor/zt/cuda/Guard.h"
 #include "core/Dispatch.h"
 #include "core/ParallelFor.h"
 #include "core/ShapeUtil.h"  // WrapDim, DefaultStrides

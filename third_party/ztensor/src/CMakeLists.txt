@@ -22,6 +22,9 @@ set(_zt_public_headers
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/Generator.h
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/dlpack.h
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/utility/Log.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Exception.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Stream.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Guard.h
 )
 
 # Core sources (compiled in every build; CUDA sources added below).

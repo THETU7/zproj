@@ -23,7 +23,10 @@
 #include "ztensor/zt/utility/Log.h"
 
 #ifdef __CUDACC__
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/Macros.h"
+#include "ztensor/zt/cuda/Exception.h"
+#include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Stream.h"
 #endif
 
 namespace zt::core {

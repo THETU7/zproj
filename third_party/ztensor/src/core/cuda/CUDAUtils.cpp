@@ -10,7 +10,8 @@
 #include "ztensor/zt/Device.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Exception.h"
+#include "ztensor/zt/cuda/Guard.h"
 
 namespace zt {
 namespace cuda {

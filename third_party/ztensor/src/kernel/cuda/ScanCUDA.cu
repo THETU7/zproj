@@ -6,7 +6,7 @@
 // kernel, then copies the result back to the GPU dst.
 // Future optimization: use CUB DeviceScan for contiguous dim=-1 scans.
 
-#include "core/cuda/CUDAUtils.h"
+#include "ztensor/zt/cuda/Guard.h"
 #include "kernel/Scan.h"
 
 namespace zt {
