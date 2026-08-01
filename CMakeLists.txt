@@ -26,6 +26,13 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 
+# zproj uses no C++20 modules; disable CMake's module dependency scanning
+# (CMake >= 4 enables it by default for Ninja + GCC 15). The scanning injects
+# GCC-only flags (-fmodules-ts, -fmodule-mapper=..., -fdeps-format=p1689r5)
+# into every C++ compile command, which clangd cannot parse and which are pure
+# overhead here.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()

@@ -11,10 +11,11 @@ CompileFlags:
     - --options-file*
     - --generate-code*
     - --expt-relaxed-constexpr
+    - --expt-extended-lambda
+    - --Werror=*
     - -Xcompiler*
     - -MD
     - -MT
     - -MF
     - -ccbin=*
     - -arch=native
-
