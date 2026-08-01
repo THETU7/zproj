@@ -16,14 +16,14 @@
 #include <type_traits>
 #include <vector>
 
+#include <Eigen/Dense>
+
 #include "ztensor/zt/BFloat16.h"
 #include "ztensor/zt/Half.h"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "kernel/MatMul.h"
-
-#include <Eigen/Dense>
 
 namespace zt {
 namespace kernel {
