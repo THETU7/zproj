@@ -40,10 +40,23 @@ struct Ecef {
 // Convert a single geodetic point to ECEF. Identical math on host and device.
 ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
     using namespace wgs84;
+#ifdef __CUDACC__
+    // Device: sincos() computes each (sin, cos) pair with one range reduction
+    // and a shared polynomial instead of two independent transcendentals,
+    // which dominate the kernel's runtime (double-precision math is the
+    // bottleneck on consumer GeForce parts).
+    double sin_lat = 0.0;
+    double cos_lat = 0.0;
+    double sin_lon = 0.0;
+    double cos_lon = 0.0;
+    sincos(g.lat, &sin_lat, &cos_lat);
+    sincos(g.lon, &sin_lon, &cos_lon);
+#else
     const double sin_lat = sin(g.lat);
     const double cos_lat = cos(g.lat);
     const double sin_lon = sin(g.lon);
     const double cos_lon = cos(g.lon);
+#endif  // __CUDACC__
     // Prime-vertical radius of curvature.
     const double N =
         kSemiMajorAxis / sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
