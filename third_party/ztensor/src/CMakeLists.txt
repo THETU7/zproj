@@ -152,3 +152,16 @@ zt_target_set_warnings(ztensor)
 
 # Group the public headers in IDEs.
 source_group(TREE ${PROJECT_SOURCE_DIR}/include FILES ${_zt_public_headers})
+
+# ----------------------------------------------------------------------------
+# Optional Eigen interop module (zt::eigen), header-only.
+# ----------------------------------------------------------------------------
+# Eigen is already a hard dependency (CPU matmul GEMM). This INTERFACE target
+# makes it PUBLIC so consumers who link zt::ztensor_eigen see Eigen's headers;
+# the core ztensor target above keeps Eigen PRIVATE, so embedding ztensor as a
+# subdirectory never forces Eigen on the parent. The header lives under
+# include/ztensor/zt/eigen/ and ships with the include tree.
+add_library(ztensor_eigen INTERFACE)
+add_library(zt::ztensor_eigen ALIAS ztensor_eigen)
+target_link_libraries(ztensor_eigen INTERFACE zt::ztensor Eigen3::Eigen)
+target_compile_features(ztensor_eigen INTERFACE cxx_std_17)
