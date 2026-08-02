@@ -72,8 +72,9 @@ std::vector<Geodetic> MakePoints(std::size_t n) {
 
     std::vector<Geodetic> pts(n);
     for (std::size_t i = 0; i < n; ++i) {
-        pts[i] = Geodetic{
-            lat_deg(rng) * kDeg2Rad, lon_deg(rng) * kDeg2Rad, height(rng)};
+        // Geodetic is (lon, lat, h): x = lon, y = lat, z = h.
+        pts[i] = Geodetic(
+            lon_deg(rng) * kDeg2Rad, lat_deg(rng) * kDeg2Rad, height(rng));
     }
     return pts;
 }
@@ -98,14 +99,14 @@ std::vector<Ecef> Wgs84ToEcefGdal(const std::vector<Geodetic>& geo) {
 
     std::vector<Ecef> out(geo.size());
     for (std::size_t i = 0; i < geo.size(); ++i) {
-        double x = geo[i].lon * kRad2Deg;
-        double y = geo[i].lat * kRad2Deg;
-        double z = geo[i].h;
+        double x = geo[i].x() * kRad2Deg;  // lon
+        double y = geo[i].y() * kRad2Deg;  // lat
+        double z = geo[i].z();             // h
         if (ct->Transform(1, &x, &y, &z) == 0) {
             std::cerr << "GDAL transform failed at index " << i << "\n";
             std::exit(EXIT_FAILURE);
         }
-        out[i] = Ecef{x, y, z};
+        out[i] = Ecef(x, y, z);
     }
     return out;
 }
@@ -130,14 +131,15 @@ std::vector<Geodetic> EcefToWgs84Gdal(const std::vector<Ecef>& ecef) {
 
     std::vector<Geodetic> out(ecef.size());
     for (std::size_t i = 0; i < ecef.size(); ++i) {
-        double x = ecef[i].x;
-        double y = ecef[i].y;
-        double z = ecef[i].z;
+        double x = ecef[i].x();
+        double y = ecef[i].y();
+        double z = ecef[i].z();
         if (ct->Transform(1, &x, &y, &z) == 0) {
             std::cerr << "GDAL transform failed at index " << i << "\n";
             std::exit(EXIT_FAILURE);
         }
-        out[i] = Geodetic{y * kDeg2Rad, x * kDeg2Rad, z};
+        // Geodetic is (lon, lat, h): x = lon, y = lat, z = h.
+        out[i] = Geodetic(x * kDeg2Rad, y * kDeg2Rad, z);
     }
     return out;
 }
@@ -157,8 +159,8 @@ double BenchMs(int reps, Fn&& fn) {
 double MaxError(const std::vector<Ecef>& a, const std::vector<Ecef>& b) {
     double worst = 0.0;
     for (std::size_t i = 0; i < a.size(); ++i) {
-        const Eigen::Vector3d va(a[i].x, a[i].y, a[i].z);
-        const Eigen::Vector3d vb(b[i].x, b[i].y, b[i].z);
+        const Eigen::Vector3d va(a[i].x(), a[i].y(), a[i].z());
+        const Eigen::Vector3d vb(b[i].x(), b[i].y(), b[i].z());
         worst = std::max(worst, (va - vb).norm());
     }
     return worst;
@@ -182,9 +184,9 @@ GeodeticError MaxGeodeticError(const std::vector<Geodetic>& a,
                                const std::vector<Geodetic>& b) {
     GeodeticError worst;
     for (std::size_t i = 0; i < a.size(); ++i) {
-        worst.lat = std::max(worst.lat, std::abs(a[i].lat - b[i].lat));
-        worst.lon = std::max(worst.lon, std::abs(a[i].lon - b[i].lon));
-        worst.h = std::max(worst.h, std::abs(a[i].h - b[i].h));
+        worst.lat = std::max(worst.lat, std::abs(a[i].y() - b[i].y()));
+        worst.lon = std::max(worst.lon, std::abs(a[i].x() - b[i].x()));
+        worst.h = std::max(worst.h, std::abs(a[i].z() - b[i].z()));
     }
     return worst;
 }

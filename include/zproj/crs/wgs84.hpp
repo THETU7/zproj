@@ -1,5 +1,11 @@
 // WGS84 reference ellipsoid constants and the geodetic <-> ECEF transforms.
 //
+// Points in both coordinate spaces are represented by the same vector type,
+// zt::eigen::Vec3d (= Eigen::Vector3d), so the geometry flows directly
+// through ztensor's Eigen interop (zt::eigen::from_vector / to_vector):
+//   * Geodetic: (lon, lat, h) -- x = lon [rad], y = lat [rad], z = h [m]
+//   * ECEF:     (x, y, z)     -- metres
+//
 // Everything here is usable from both host (plain C++) and device (CUDA)
 // translation units. The ZPROJ_HD macro expands to __host__ __device__ under
 // nvcc and to nothing otherwise, so the identical math is shared between the
@@ -8,6 +14,7 @@
 
 #include <cmath>
 
+#include "ztensor/zt/eigen/EigenConvert.h"
 #include "ztensor/zt/Macros.h"
 
 namespace zproj::crs {
@@ -23,21 +30,16 @@ inline constexpr double kSemiMinorAxis =
     kSemiMajorAxis * (1.0 - kFlattening);  // b
 }  // namespace wgs84
 
-// Geodetic coordinates. Angles are in radians.
-struct Geodetic {
-    double lat = 0.0;  // latitude  [rad]
-    double lon = 0.0;  // longitude [rad]
-    double h = 0.0;    // ellipsoidal height [m]
-};
+// Geodetic coordinates as a Vec3d: x = lon [rad], y = lat [rad], z = h [m].
+// (Doubles only -- single precision is too coarse for positions near the
+// 6.4e6 m ellipsoid radius.)
+using Geodetic = zt::eigen::Vec3d;
 
-// Earth-Centered, Earth-Fixed cartesian coordinates [m].
-struct Ecef {
-    double x = 0.0;
-    double y = 0.0;
-    double z = 0.0;
-};
+// Earth-Centered, Earth-Fixed cartesian coordinates as a Vec3d [m].
+using Ecef = zt::eigen::Vec3d;
 
-// Convert a single geodetic point to ECEF. Identical math on host and device.
+// Convert a single geodetic point (lon, lat, h) to ECEF. Identical math on
+// host and device.
 ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
     using namespace wgs84;
 #ifdef __CUDACC__
@@ -49,26 +51,24 @@ ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
     double cos_lat = 0.0;
     double sin_lon = 0.0;
     double cos_lon = 0.0;
-    sincos(g.lat, &sin_lat, &cos_lat);
-    sincos(g.lon, &sin_lon, &cos_lon);
+    sincos(g.y(), &sin_lat, &cos_lat);
+    sincos(g.x(), &sin_lon, &cos_lon);
 #else
-    const double sin_lat = sin(g.lat);
-    const double cos_lat = cos(g.lat);
-    const double sin_lon = sin(g.lon);
-    const double cos_lon = cos(g.lon);
+    const double sin_lat = sin(g.y());
+    const double cos_lat = cos(g.y());
+    const double sin_lon = sin(g.x());
+    const double cos_lon = cos(g.x());
 #endif  // __CUDACC__
     // Prime-vertical radius of curvature.
     const double N =
         kSemiMajorAxis / sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
-    return Ecef{
-        (N + g.h) * cos_lat * cos_lon,
-        (N + g.h) * cos_lat * sin_lon,
-        (N * (1.0 - kEccentricitySquared) + g.h) * sin_lat,
-    };
+    return Ecef{(N + g.z()) * cos_lat * cos_lon,
+                (N + g.z()) * cos_lat * sin_lon,
+                (N * (1.0 - kEccentricitySquared) + g.z()) * sin_lat};
 }
 
-// Convert a single ECEF point to geodetic (WGS84) coordinates. Identical math
-// on host and device.
+// Convert a single ECEF point to geodetic (WGS84) coordinates (lon, lat, h).
+// Identical math on host and device.
 //
 // Bowring's method (B. R. Bowring, "Transformation from spatial to
 // geographical coordinates", Survey Review 23(181), 1976) -- the same
@@ -78,7 +78,7 @@ ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
 ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
     using namespace wgs84;
     // Perpendicular distance from the point to the Z axis (HM eq. 5-28).
-    const double p = hypot(e.x, e.y);
+    const double p = hypot(e.x(), e.y());
 
     // Ancillary ellipsoidal parameters. The second eccentricity is computed
     // as (a-b)(a+b)/b^2 (PROJ's second_eccentricity_squared) instead of
@@ -87,7 +87,7 @@ ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
     const double second_e2 =
         (kSemiMajorAxis - b) * (kSemiMajorAxis + b) / (b * b);
 
-    const double theta = atan2(e.z * kSemiMajorAxis, p * b);
+    const double theta = atan2(e.z() * kSemiMajorAxis, p * b);
 #ifdef __CUDACC__
     double sin_theta = 0.0;
     double cos_theta = 0.0;
@@ -99,10 +99,10 @@ ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
 
     // Geodetic latitude (Bowring, 1976) and longitude.
     const double lat =
-        atan2(e.z + second_e2 * b * sin_theta * sin_theta * sin_theta,
+        atan2(e.z() + second_e2 * b * sin_theta * sin_theta * sin_theta,
               p - kEccentricitySquared * kSemiMajorAxis * cos_theta *
                       cos_theta * cos_theta);
-    const double lon = atan2(e.y, e.x);
+    const double lon = atan2(e.y(), e.x());
 
     // Prime-vertical radius at the computed latitude, then the height.
 #ifdef __CUDACC__
@@ -120,11 +120,12 @@ ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
     if (fabs(cos_lat) < 1e-3) {
         // Poleward of ~89.94 deg, p / cos(lat) would divide by ~0, so compute
         // the height along the Z axis instead (same guard as PROJ's inverse).
-        h = e.z - (e.z > 0.0 ? b : -b);
+        h = e.z() - (e.z() > 0.0 ? b : -b);
     } else {
         h = p / cos_lat - n;
     }
-    return Geodetic{lat, lon, h};
+    // x = lon, y = lat, z = h.
+    return Geodetic{lon, lat, h};
 }
 
 }  // namespace zproj::crs

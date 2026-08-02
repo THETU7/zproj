@@ -56,15 +56,15 @@ Geodetic ReferenceGeodetic(const Ecef& e) {
     const double es = wgs84::kEccentricitySquared;
     const double ep2 = (a - b) * (a + b) / (b * b);
 
-    const double p = std::hypot(e.x, e.y);
-    const double theta = std::atan2(e.z * a, p * b);
+    const double p = std::hypot(e.x(), e.y());
+    const double theta = std::atan2(e.z() * a, p * b);
     const double sin_theta = std::sin(theta);
     const double cos_theta = std::cos(theta);
 
     const double lat =
-        std::atan2(e.z + ep2 * b * sin_theta * sin_theta * sin_theta,
+        std::atan2(e.z() + ep2 * b * sin_theta * sin_theta * sin_theta,
                    p - es * a * cos_theta * cos_theta * cos_theta);
-    const double lon = std::atan2(e.y, e.x);
+    const double lon = std::atan2(e.y(), e.x());
 
     const double sin_lat = std::sin(lat);
     const double cos_lat = std::cos(lat);
@@ -72,11 +72,12 @@ Geodetic ReferenceGeodetic(const Ecef& e) {
 
     double h = 0.0;
     if (std::fabs(cos_lat) < 1e-3) {
-        h = e.z - (e.z > 0.0 ? b : -b);
+        h = e.z() - (e.z() > 0.0 ? b : -b);
     } else {
         h = p / cos_lat - n;
     }
-    return Geodetic{lat, lon, h};
+    // x = lon, y = lat, z = h.
+    return Geodetic{lon, lat, h};
 }
 
 // Deterministic pseudo-random geodetic points with a fixed seed.
@@ -88,8 +89,8 @@ std::vector<Geodetic> MakePoints(std::size_t n) {
 
     std::vector<Geodetic> pts(n);
     for (std::size_t i = 0; i < n; ++i) {
-        pts[i] = Geodetic{
-            lat_deg(rng) * kDeg2Rad, lon_deg(rng) * kDeg2Rad, height(rng)};
+        pts[i] = Geodetic(
+            lon_deg(rng) * kDeg2Rad, lat_deg(rng) * kDeg2Rad, height(rng));
     }
     return pts;
 }
@@ -104,8 +105,8 @@ std::vector<Ecef> MakeEcef(std::size_t n) {
 
     std::vector<Ecef> pts(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const Geodetic g{
-            lat_deg(rng) * kDeg2Rad, lon_deg(rng) * kDeg2Rad, height(rng)};
+        const Geodetic g(
+            lon_deg(rng) * kDeg2Rad, lat_deg(rng) * kDeg2Rad, height(rng));
         pts[i] = to_ecef(g);
     }
     return pts;
@@ -139,9 +140,9 @@ void ExpectNearGeodetic(const zt::Tensor& out,
     const double* p = out.data_ptr<double>();
     for (int64_t i = 0; i < out.size(0); ++i) {
         const Geodetic& g = expected[static_cast<std::size_t>(i)];
-        EXPECT_NEAR(p[3 * i + 0], g.lat, kTolAng) << "point " << i << " lat";
-        EXPECT_NEAR(p[3 * i + 1], g.lon, kTolAng) << "point " << i << " lon";
-        EXPECT_NEAR(p[3 * i + 2], g.h, kTolH) << "point " << i << " h";
+        EXPECT_NEAR(p[3 * i + 0], g.x(), kTolAng) << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], g.y(), kTolAng) << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], g.z(), kTolH) << "point " << i << " h";
     }
 }
 
@@ -175,24 +176,25 @@ TEST(EcefToWgs84Cpu, KnownPoints) {
     ASSERT_TRUE(out.is_cpu());
     ASSERT_EQ(out.size(0), 6);
     const double* p = out.data_ptr<double>();
-    EXPECT_NEAR(p[0], 0.0, kTolAng);
-    EXPECT_NEAR(p[1], 0.0, kTolAng);
-    EXPECT_NEAR(p[2], 0.0, kTolH);
-    EXPECT_NEAR(p[3], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[4], 0.0, kTolAng);
-    EXPECT_NEAR(p[5], 0.0, kTolH);
-    EXPECT_NEAR(p[6], -kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[7], 0.0, kTolAng);
-    EXPECT_NEAR(p[8], 0.0, kTolH);
-    EXPECT_NEAR(p[9], 0.0, kTolAng);
-    EXPECT_NEAR(p[10], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[11], 0.0, kTolH);
-    EXPECT_NEAR(p[12], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[13], 0.0, kTolAng);
-    EXPECT_NEAR(p[14], 1000.0, kTolH);
-    EXPECT_NEAR(p[15], -kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[16], 0.0, kTolAng);
-    EXPECT_NEAR(p[17], -1000.0, kTolH);
+    // Output is (lon, lat, h) per point.
+    EXPECT_NEAR(p[0], 0.0, kTolAng);          // point 0: lon
+    EXPECT_NEAR(p[1], 0.0, kTolAng);          //          lat
+    EXPECT_NEAR(p[2], 0.0, kTolH);            //          h
+    EXPECT_NEAR(p[3], 0.0, kTolAng);          // point 1: lon
+    EXPECT_NEAR(p[4], kPi / 2.0, kTolAng);    //          lat
+    EXPECT_NEAR(p[5], 0.0, kTolH);            //          h
+    EXPECT_NEAR(p[6], 0.0, kTolAng);          // point 2: lon
+    EXPECT_NEAR(p[7], -kPi / 2.0, kTolAng);   //          lat
+    EXPECT_NEAR(p[8], 0.0, kTolH);            //          h
+    EXPECT_NEAR(p[9], kPi / 2.0, kTolAng);    // point 3: lon
+    EXPECT_NEAR(p[10], 0.0, kTolAng);         //          lat
+    EXPECT_NEAR(p[11], 0.0, kTolH);           //          h
+    EXPECT_NEAR(p[12], 0.0, kTolAng);         // point 4: lon
+    EXPECT_NEAR(p[13], kPi / 2.0, kTolAng);   //          lat
+    EXPECT_NEAR(p[14], 1000.0, kTolH);        //          h
+    EXPECT_NEAR(p[15], 0.0, kTolAng);         // point 5: lon
+    EXPECT_NEAR(p[16], -kPi / 2.0, kTolAng);  //          lat
+    EXPECT_NEAR(p[17], -1000.0, kTolH);       //          h
 }
 
 TEST(EcefToWgs84Cpu, BatchMatchesReference) {
@@ -240,9 +242,9 @@ TEST(EcefToWgs84Cpu, RoundTripsGeodeticPoints) {
     const double* p = out.data_ptr<double>();
     for (int64_t i = 0; i < kNumPoints; ++i) {
         const Geodetic& g = pts[static_cast<std::size_t>(i)];
-        EXPECT_NEAR(p[3 * i + 0], g.lat, kTolAng) << "point " << i << " lat";
-        EXPECT_NEAR(p[3 * i + 1], g.lon, kTolAng) << "point " << i << " lon";
-        EXPECT_NEAR(p[3 * i + 2], g.h, kTolH) << "point " << i << " h";
+        EXPECT_NEAR(p[3 * i + 0], g.x(), kTolAng) << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], g.y(), kTolAng) << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], g.z(), kTolH) << "point " << i << " h";
     }
 }
 
@@ -306,18 +308,22 @@ TEST_F(EcefToWgs84CudaTest, KnownPoints) {
     ASSERT_EQ(out.size(0), 5);
     const zt::Tensor out_cpu = out.cpu();
     const double* p = out_cpu.data_ptr<double>();
-    EXPECT_NEAR(p[0], 0.0, kTolAng);
-    EXPECT_NEAR(p[1], 0.0, kTolAng);
-    EXPECT_NEAR(p[2], 0.0, kTolH);
-    EXPECT_NEAR(p[3], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[5], 0.0, kTolH);
-    EXPECT_NEAR(p[6], -kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[8], 0.0, kTolH);
-    EXPECT_NEAR(p[9], 0.0, kTolAng);
-    EXPECT_NEAR(p[10], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[11], 0.0, kTolH);
-    EXPECT_NEAR(p[12], kPi / 2.0, kTolAng);
-    EXPECT_NEAR(p[14], 1000.0, kTolH);
+    // Output is (lon, lat, h) per point.
+    EXPECT_NEAR(p[0], 0.0, kTolAng);         // point 0: lon
+    EXPECT_NEAR(p[1], 0.0, kTolAng);         //          lat
+    EXPECT_NEAR(p[2], 0.0, kTolH);           //          h
+    EXPECT_NEAR(p[3], 0.0, kTolAng);         // point 1: lon
+    EXPECT_NEAR(p[4], kPi / 2.0, kTolAng);   //          lat
+    EXPECT_NEAR(p[5], 0.0, kTolH);           //          h
+    EXPECT_NEAR(p[6], 0.0, kTolAng);         // point 2: lon
+    EXPECT_NEAR(p[7], -kPi / 2.0, kTolAng);  //          lat
+    EXPECT_NEAR(p[8], 0.0, kTolH);           //          h
+    EXPECT_NEAR(p[9], kPi / 2.0, kTolAng);   // point 3: lon
+    EXPECT_NEAR(p[10], 0.0, kTolAng);        //          lat
+    EXPECT_NEAR(p[11], 0.0, kTolH);          //          h
+    EXPECT_NEAR(p[12], 0.0, kTolAng);        // point 4: lon
+    EXPECT_NEAR(p[13], kPi / 2.0, kTolAng);  //          lat
+    EXPECT_NEAR(p[14], 1000.0, kTolH);       //          h
 }
 
 TEST_F(EcefToWgs84CudaTest, BatchMatchesReference) {
@@ -397,9 +403,9 @@ TEST_F(EcefToWgs84CudaTest, RoundTripsGeodeticPoints) {
     const double* p = out_cpu.data_ptr<double>();
     for (int64_t i = 0; i < kNumPoints; ++i) {
         const Geodetic& g = pts[static_cast<std::size_t>(i)];
-        EXPECT_NEAR(p[3 * i + 0], g.lat, kTolAng) << "point " << i << " lat";
-        EXPECT_NEAR(p[3 * i + 1], g.lon, kTolAng) << "point " << i << " lon";
-        EXPECT_NEAR(p[3 * i + 2], g.h, kTolH) << "point " << i << " h";
+        EXPECT_NEAR(p[3 * i + 0], g.x(), kTolAng) << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], g.y(), kTolAng) << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], g.z(), kTolH) << "point " << i << " h";
     }
 }
 
