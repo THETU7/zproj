@@ -171,6 +171,13 @@ std::vector<E> to_vector(const Tensor& t) {
     constexpr int64_t kRows = E::RowsAtCompileTime;
     constexpr int64_t kCols = E::ColsAtCompileTime;
 
+    // Host-only: this reads data_ptr() straight into host memory (memcpy /
+    // Eigen::Map). A device pointer would crash, so reject up front rather
+    // than silently dereferencing it.
+    ZT_CHECK(t.is_cpu(),
+             "to_vector: host-only conversion; move CUDA tensors with .cpu() "
+             "first (got {})",
+             t.device().string());
     ZT_CHECK(t.scalar_type() == CppTypeToScalarType<Scalar>::value,
              "to_vector: dtype mismatch (tensor {}, expected {})",
              toString(t.scalar_type()),
@@ -280,6 +287,11 @@ MatrixType to_matrix(const Tensor& t) {
     constexpr int64_t kRows = MatrixType::RowsAtCompileTime;
     constexpr int64_t kCols = MatrixType::ColsAtCompileTime;
 
+    // Host-only: see to_vector. Eigen::Map over a device pointer would crash.
+    ZT_CHECK(t.is_cpu(),
+             "to_matrix: host-only conversion; move CUDA tensors with .cpu() "
+             "first (got {})",
+             t.device().string());
     ZT_CHECK(t.dim() == 2, "to_matrix: expected 2-D, got {}-D", t.dim());
     ZT_CHECK(t.scalar_type() == CppTypeToScalarType<Scalar>::value,
              "to_matrix: dtype mismatch (tensor {}, expected {})",
