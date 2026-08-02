@@ -1,4 +1,4 @@
-// WGS84 reference ellipsoid constants and the geodetic -> ECEF transform.
+// WGS84 reference ellipsoid constants and the geodetic <-> ECEF transforms.
 //
 // Everything here is usable from both host (plain C++) and device (CUDA)
 // translation units. The ZPROJ_HD macro expands to __host__ __device__ under
@@ -65,6 +65,66 @@ ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
         (N + g.h) * cos_lat * sin_lon,
         (N * (1.0 - kEccentricitySquared) + g.h) * sin_lat,
     };
+}
+
+// Convert a single ECEF point to geodetic (WGS84) coordinates. Identical math
+// on host and device.
+//
+// Bowring's method (B. R. Bowring, "Transformation from spatial to
+// geographical coordinates", Survey Review 23(181), 1976) -- the same
+// algorithm PROJ's `cart` operation uses for the inverse, so results match the
+// GDAL/PROJ reference to round-off. theta is a first approximation of the
+// reduced latitude; the atan2() correction yields the geodetic latitude.
+ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
+    using namespace wgs84;
+    // Perpendicular distance from the point to the Z axis (HM eq. 5-28).
+    const double p = hypot(e.x, e.y);
+
+    // Ancillary ellipsoidal parameters. The second eccentricity is computed
+    // as (a-b)(a+b)/b^2 (PROJ's second_eccentricity_squared) instead of
+    // e^2/(1-e^2) for better numerical precision.
+    const double b = kSemiMinorAxis;
+    const double second_e2 =
+        (kSemiMajorAxis - b) * (kSemiMajorAxis + b) / (b * b);
+
+    const double theta = atan2(e.z * kSemiMajorAxis, p * b);
+#ifdef __CUDACC__
+    double sin_theta = 0.0;
+    double cos_theta = 0.0;
+    sincos(theta, &sin_theta, &cos_theta);
+#else
+    const double sin_theta = sin(theta);
+    const double cos_theta = cos(theta);
+#endif  // __CUDACC__
+
+    // Geodetic latitude (Bowring, 1976) and longitude.
+    const double lat =
+        atan2(e.z + second_e2 * b * sin_theta * sin_theta * sin_theta,
+              p - kEccentricitySquared * kSemiMajorAxis * cos_theta *
+                      cos_theta * cos_theta);
+    const double lon = atan2(e.y, e.x);
+
+    // Prime-vertical radius at the computed latitude, then the height.
+#ifdef __CUDACC__
+    double sin_lat = 0.0;
+    double cos_lat = 0.0;
+    sincos(lat, &sin_lat, &cos_lat);
+#else
+    const double sin_lat = sin(lat);
+    const double cos_lat = cos(lat);
+#endif  // __CUDACC__
+    const double n =
+        kSemiMajorAxis / sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
+
+    double h = 0.0;
+    if (fabs(cos_lat) < 1e-3) {
+        // Poleward of ~89.94 deg, p / cos(lat) would divide by ~0, so compute
+        // the height along the Z axis instead (same guard as PROJ's inverse).
+        h = e.z - (e.z > 0.0 ? b : -b);
+    } else {
+        h = p / cos_lat - n;
+    }
+    return Geodetic{lat, lon, h};
 }
 
 }  // namespace zproj::crs

@@ -9,6 +9,11 @@ target_link_libraries(test_wgs84_to_ecef PRIVATE zproj GTest::gtest)
 include(GoogleTest)
 gtest_discover_tests(test_wgs84_to_ecef)
 
+add_executable(test_ecef_to_wgs84 test_ecef_to_wgs84.cpp)
+target_link_libraries(test_ecef_to_wgs84 PRIVATE zproj GTest::gtest)
+include(GoogleTest)
+gtest_discover_tests(test_ecef_to_wgs84)
+
 add_executable(test_ztensor test_ztensor.cpp)
 target_link_libraries(test_ztensor PRIVATE zt::ztensor CUDA::cudart)
 add_test(NAME zproj.ztensor COMMAND test_ztensor)

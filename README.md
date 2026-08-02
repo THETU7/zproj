@@ -2,7 +2,7 @@
 
 A learning project for **CUDA-accelerated coordinate transformations**. The core
 idea is to rewrite common [PROJ](https://proj.org/)/[GDAL](https://gdal.org/)
-coordinate operations (e.g. WGS84 geodetic → ECEF) on the GPU and compare them
+coordinate operations (e.g. WGS84 geodetic ↔ ECEF) on the GPU and compare them
 against the GDAL/PROJ reference.
 
 Toolchain: **C++20 · CMake · GDAL (wraps PROJ) · CUDA · Eigen (system) ·
@@ -45,7 +45,7 @@ zproj/
 │   ├── crs/                 #   CUDA implementations
 │   └── zproj/cuda/          #   private CUDA helpers (error checking)
 ├── examples/                # runnable demos
-│   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernel + timing
+│   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernels (both ways) + timing
 │   ├── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
 │   └── eigen_gpu/            #   DISABLED (needed vendored-master Eigen GPU/Tensor)
 └── tests/                   # analytic smoke tests (CTest)
@@ -55,9 +55,9 @@ zproj/
 
 - **Reference path** is GDAL/PROJ on the CPU (e.g. EPSG:4326 → EPSG:4978). It is
   the ground truth the GPU kernel is validated against.
-- **Fast path** is a CUDA kernel. The geodetic → ECEF math is identical on host
-  and device (see `ZPROJ_HD` in `wgs84.hpp`), so the CPU reference and the GPU
-  kernel cannot drift apart.
+- **Fast path** is a CUDA kernel. The geodetic ↔ ECEF math (forward +
+  Bowring-method inverse) is identical on host and device (see `ZPROJ_HD` in
+  `wgs84.hpp`), so the CPU reference and the GPU kernel cannot drift apart.
 - **Eigen** (system install) is used only for plain host-side math (error
   norms, etc.). GPU/tensor acceleration is provided by the vendored ztensor
   instead — see the ztensor section below.
@@ -123,9 +123,10 @@ last synced from.
 
 ## Status
 
-Skeleton + first transform (`wgs84 → ecef`), with the GDAL reference path and a
-CUDA kernel that agree to ~1e-8 m. The vendored ztensor builds with its CUDA
-backend and is exercised by `examples/ztensor_basic` + `tests/test_ztensor`.
+Skeleton + the `wgs84 ↔ ecef` transforms (forward + inverse), with the GDAL
+reference path and CUDA kernels that agree to ~1e-8 m. The vendored ztensor
+builds with its CUDA backend and is exercised by `examples/ztensor_basic` +
+`tests/test_ztensor`.
 
 The former Eigen GPU/Tensor demo (`examples/eigen_gpu`) is commented out:
 it required the vendored master Eigen, which has been removed in favor of the
