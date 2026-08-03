@@ -108,6 +108,10 @@ add_library(zproj STATIC
     src/crs/ecef_to_wgs84.cpp
     src/crs/cpu/ecef_to_wgs84_cpu.cpp
     src/crs/cuda/ecef_to_wgs84_cuda.cu
+    src/rpc/rpc.cpp
+    src/rpc/cpu/rpc_cpu.cpp
+    src/rpc/cuda/rpc_cuda.cu
+    src/rpc/rpc_io.cpp
 )
 add_library(zproj::zproj ALIAS zproj)
 

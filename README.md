@@ -21,6 +21,7 @@ cmake --preset default
 cmake --build --preset default
 ctest --preset default                 # unit tests
 ./build/default/bin/wgs84_to_ecef      # GDAL-vs-CUDA comparison + timing
+./build/default/bin/rpc               # RPC sensor model (lon/lat/alt <-> col/row) vs GDAL
 ./build/default/bin/ztensor_basic      # vendored ztensor (CPU + CUDA) smoke
 ```
 
@@ -40,12 +41,15 @@ zproj/
 │   ├── push-ztensor.sh        #   vendored changes -> upstream ztensor checkout
 │   └── sync-ztensor.sh        #   upstream ztensor checkout -> vendored copy
 ├── include/zproj/           # public headers
-│   └── crs/                 #   wgs84 constants + geodetic/ECEF types + math
+│   ├── crs/                 #   wgs84 constants + geodetic/ECEF types + math
+│   └── rpc/                 #   RPC sensor model (coefficients + transforms + I/O)
 ├── src/                     # library sources (.cu kernels + host wrappers)
-│   ├── crs/                 #   CUDA implementations
+│   ├── crs/                 #   wgs84 <-> ecef implementations
+│   ├── rpc/                 #   RPC forward/inverse implementations
 │   └── zproj/cuda/          #   private CUDA helpers (error checking)
 ├── examples/                # runnable demos
 │   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernels (both ways) + timing
+│   ├── rpc/                 #   RPC forward/inverse vs GDAL on a real satellite RPC
 │   ├── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
 │   └── eigen_gpu/            #   DISABLED (needed vendored-master Eigen GPU/Tensor)
 └── tests/                   # analytic smoke tests (CTest)
@@ -127,6 +131,13 @@ Skeleton + the `wgs84 ↔ ecef` transforms (forward + inverse), with the GDAL
 reference path and CUDA kernels that agree to ~1e-8 m. The vendored ztensor
 builds with its CUDA backend and is exercised by `examples/ztensor_basic` +
 `tests/test_ztensor`.
+
+The RPC sensor model (`zproj::rpc`) implements the forward
+`lon/lat/alt -> col/row` and the iterative `col/row/alt -> lon/lat` transforms
+(GDAL's GDALRPCTransformer, no DEM -- heights are always supplied by the
+caller), with host/device-shared math, CPU + CUDA paths, an RPC text-file
+parser (`rpc_io`), and a GDAL cross-check on a real GeoEye RPC
+(`examples/rpc`, `tests/test_rpc.cpp`).
 
 The former Eigen GPU/Tensor demo (`examples/eigen_gpu`) is commented out:
 it required the vendored master Eigen, which has been removed in favor of the
