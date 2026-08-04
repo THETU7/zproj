@@ -46,12 +46,20 @@ using zproj::rpc::RpcModel;
 using zproj::rpc::RpcOptions;
 
 constexpr double kTolColRow = 1e-6;    // px, forward vs reference / GDAL
-constexpr double kTolLonLat = 1e-3;    // deg, inverse round-trips / GDAL
 constexpr double kTolAnalytic = 1e-9;  // px, identity model
 // The iterative inverse stops once the back-transform error drops below
 // RpcOptions::pixel_error_threshold (0.1 px), so a col/row round-trip is
 // only guaranteed to land within that threshold of the original pixel.
 constexpr double kTolRoundTripPx = 0.15;
+// Inverse lon/lat tolerance in degrees, derived from the convergence
+// guarantee rather than picked arbitrarily: the back-projection error is
+// < 0.1 px, and the synthetic model maps ~samp_scale/long_scale = 5000 px per
+// degree, so a single converged point is within ~0.1/5000 = 2e-5 deg of the
+// true position. Two independently converged points (e.g. zproj vs GDAL, or
+// CPU vs CUDA) can differ by up to 2x that, and the local Jacobian varies a
+// few percent with the non-linear terms -- 1e-4 deg keeps a 5x margin.
+// (Measured on the fixed seed: round-trip ~2.0e-5 deg, zproj-vs-GDAL ~1e-14.)
+constexpr double kTolInverseDeg = 1e-4;
 
 // A near-identity RPC00 model with mild non-linear terms and known bounds.
 // Within the validity window the normalized coordinates stay in [-1, 1] and
@@ -370,8 +378,10 @@ TEST(RpcCpu, InverseMatchesGdal) {
     const std::vector<std::pair<double, double>> got = ToPairs(ll);
 
     for (std::size_t i = 0; i < cr.size(); ++i) {
-        EXPECT_NEAR(got[i].first, x[i], kTolLonLat) << "point " << i << " lon";
-        EXPECT_NEAR(got[i].second, y[i], kTolLonLat) << "point " << i << " lat";
+        EXPECT_NEAR(got[i].first, x[i], kTolInverseDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(got[i].second, y[i], kTolInverseDeg)
+            << "point " << i << " lat";
     }
     GDALDestroyRPCTransformer(gdal);
 }
@@ -399,9 +409,9 @@ TEST(RpcCpu, InverseRoundTripsLonLatAlt) {
     const std::vector<std::pair<double, double>> got = ToPairs(ll);
 
     for (std::size_t i = 0; i < pts.size(); ++i) {
-        EXPECT_NEAR(got[i].first, pts[i].lon, kTolLonLat)
+        EXPECT_NEAR(got[i].first, pts[i].lon, kTolInverseDeg)
             << "point " << i << " lon";
-        EXPECT_NEAR(got[i].second, pts[i].lat, kTolLonLat)
+        EXPECT_NEAR(got[i].second, pts[i].lat, kTolInverseDeg)
             << "point " << i << " lat";
     }
 }
@@ -517,8 +527,10 @@ TEST(RpcCpu, RealGeoEyeMatchesGdal) {
                            ok.data());
     EXPECT_NE(ret, 0);
     for (std::size_t i = 0; i < pts.size(); ++i) {
-        EXPECT_NEAR(got[i].first, x[i], kTolLonLat) << "point " << i << " lon";
-        EXPECT_NEAR(got[i].second, y[i], kTolLonLat) << "point " << i << " lat";
+        EXPECT_NEAR(got[i].first, x[i], kTolInverseDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(got[i].second, y[i], kTolInverseDeg)
+            << "point " << i << " lat";
     }
     GDALDestroyRPCTransformer(gdal);
 }
@@ -633,7 +645,7 @@ TEST_F(RpcCudaTest, InverseMatchesCpu) {
     for (int64_t i = 0; i < 2 * static_cast<int64_t>(pts.size()); ++i) {
         max_diff = std::max(max_diff, std::abs(a[i] - b[i]));
     }
-    EXPECT_LT(max_diff, kTolLonLat);
+    EXPECT_LT(max_diff, kTolInverseDeg);
 }
 
 TEST_F(RpcCudaTest, MixedCpuInCudaOutThrows) {
