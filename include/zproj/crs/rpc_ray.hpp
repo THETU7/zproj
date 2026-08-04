@@ -142,8 +142,9 @@ ZT_HOST_DEVICE inline bool triangulate_pair(const RpcRay& a,
     const Ecef v1 = vec_cross(v12, a.dir);
     const Ecef v2 = vec_cross(v12, b.dir);
 
-    // For unit directions, dot(v2, dir_a) = 1 - (dir_a . dir_b)^2 = sin^2 of
-    // the convergence angle: zero exactly when the rays are parallel.
+    // For unit directions, dot(v2, dir_a) = (dir_a . dir_b)^2 - 1 = -sin^2 of
+    // the convergence angle: zero exactly when the rays are parallel (the sign
+    // is irrelevant -- the threshold below uses fabs).
     const double den_a = vec_dot(v2, a.dir);
     const double den_b = vec_dot(v1, b.dir);
     if (fabs(den_a) <= 1e-12 || fabs(den_b) <= 1e-12) {

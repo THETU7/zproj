@@ -11,16 +11,6 @@ namespace zproj::crs {
 
 namespace {
 
-// Force the analytic inverse with a tight threshold: rays feeding
-// triangulation need machine precision, not the affine's ~0.1 px.
-RpcOptions AnalyticOptions(const RpcOptions& options) {
-    RpcOptions analytic = options;
-    analytic.inverse_method = InverseMethod::Analytic;
-    analytic.pixel_error_threshold = 1e-9;
-    analytic.max_iterations = 20;
-    return analytic;
-}
-
 // A [N, width] double tensor used as transform input/output.
 void CheckPointTensor(const zt::Tensor& t, int64_t width, const char* name) {
     ZT_CHECK_EQ(t.dim(), 2);
@@ -33,15 +23,11 @@ void CheckPointTensor(const zt::Tensor& t, int64_t width, const char* name) {
 
 }  // namespace
 
-RpcStereo::RpcStereo(RpcInfo left,
-                     RpcInfo right,
-                     double h_low,
-                     double h_high,
-                     RpcOptions options)
-    : left_(left, AnalyticOptions(options)),
-      right_(right, AnalyticOptions(options)),
-      h_low_(h_low),
-      h_high_(h_high) {}
+// The analytic inverse (threshold 1e-9 px, 20 iterations) is forced inside
+// rpc_ray, so RpcStereo holds RpcModels only to carry each image's RpcInfo and
+// precomputed affine seed (RpcInverseInit) -- their options_ are unused.
+RpcStereo::RpcStereo(RpcInfo left, RpcInfo right, double h_low, double h_high)
+    : left_(left), right_(right), h_low_(h_low), h_high_(h_high) {}
 
 void RpcStereo::triangulate(const zt::Tensor& left_colrow,
                             const zt::Tensor& right_colrow,

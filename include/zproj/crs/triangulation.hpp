@@ -18,11 +18,7 @@ namespace zproj::crs {
 // Two-view RPC stereo triangulation. Internally forces the analytic inverse.
 class RpcStereo {
 public:
-    RpcStereo(RpcInfo left,
-              RpcInfo right,
-              double h_low,
-              double h_high,
-              RpcOptions options = {});
+    RpcStereo(RpcInfo left, RpcInfo right, double h_low, double h_high);
 
     // left_colrow / right_colrow : [N, 2] double (col, row)
     // lonlath  : [N, 3] (lon deg, lat deg, h m)   -- may be empty, allocated
