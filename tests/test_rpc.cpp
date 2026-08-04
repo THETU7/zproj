@@ -40,6 +40,8 @@
 namespace {
 
 using zproj::crs::rpc_forward_point;
+using zproj::crs::rpc_pixel_jacobian;
+using zproj::crs::InverseMethod;
 using zproj::crs::RpcInfo;
 using zproj::crs::RpcInfoFromRpcFile;
 using zproj::crs::RpcModel;
@@ -462,6 +464,170 @@ TEST(RpcCpu, InverseRoundTripsColRowAlt) {
     }
 }
 
+// The analytic pixel Jacobian must agree with central finite differences of
+// rpc_forward_point. This is the strongest correctness check for the new
+// derivative math; exercised on both the synthetic and the real GeoEye model.
+TEST(RpcCpu, AnalyticJacobianMatchesFiniteDiff) {
+    constexpr double kEps = 1e-7;  // degrees, central-difference step
+    const auto rel_err = [](double a, double b) {
+        return std::fabs(a - b) / std::max(1.0, std::fabs(a));
+    };
+
+    const auto check = [&](const RpcInfo& info) {
+        const std::vector<Pt> pts = MakePoints(200, info);
+        for (const Pt& p : pts) {
+            double cp = 0.0;
+            double rp = 0.0;
+            double cm = 0.0;
+            double rm = 0.0;
+            rpc_forward_point(info, p.lon + kEps, p.lat, p.alt, cp, rp);
+            rpc_forward_point(info, p.lon - kEps, p.lat, p.alt, cm, rm);
+            const double fd_dcol_dlon = (cp - cm) / (2.0 * kEps);
+            const double fd_drow_dlon = (rp - rm) / (2.0 * kEps);
+
+            rpc_forward_point(info, p.lon, p.lat + kEps, p.alt, cp, rp);
+            rpc_forward_point(info, p.lon, p.lat - kEps, p.alt, cm, rm);
+            const double fd_dcol_dlat = (cp - cm) / (2.0 * kEps);
+            const double fd_drow_dlat = (rp - rm) / (2.0 * kEps);
+
+            double a_dcol_dlon = 0.0;
+            double a_dcol_dlat = 0.0;
+            double a_drow_dlon = 0.0;
+            double a_drow_dlat = 0.0;
+            rpc_pixel_jacobian(info,
+                               p.lon,
+                               p.lat,
+                               p.alt,
+                               a_dcol_dlon,
+                               a_dcol_dlat,
+                               a_drow_dlon,
+                               a_drow_dlat);
+
+            // Finite differences are the noisy reference here (roundoff
+            // dominates for the small cross-derivatives), so 1e-3 relative
+            // still cleanly separates a correct Jacobian from a sign/coefficient
+            // error (which would disagree by O(1)). Correctness is independently
+            // proven by AnalyticInverseRoundTripsToMachinePrecision below.
+            EXPECT_LT(rel_err(a_dcol_dlon, fd_dcol_dlon), 1e-3) << "dcol/dlon";
+            EXPECT_LT(rel_err(a_dcol_dlat, fd_dcol_dlat), 1e-3) << "dcol/dlat";
+            EXPECT_LT(rel_err(a_drow_dlon, fd_drow_dlon), 1e-3) << "drow/dlon";
+            EXPECT_LT(rel_err(a_drow_dlat, fd_drow_dlat), 1e-3) << "drow/dlat";
+        }
+    };
+
+    check(MakeSyntheticInfo());
+    check(RpcInfoFromRpcFile(ZPROJ_TEST_RPC_DATA));
+}
+
+// The analytic inverse converges to machine precision: forward(analytic_inverse)
+// lands essentially on the original pixel, while the affine solver (GDAL default)
+// is only guaranteed within its 0.1 px threshold.
+TEST(RpcCpu, AnalyticInverseRoundTripsToMachinePrecision) {
+    const RpcInfo info = MakeSyntheticInfo();
+    const RpcModel analytic(info, {1e-9, 20, InverseMethod::Analytic});
+    const RpcModel affine(info, {0.1, 10, InverseMethod::AffineGdal});
+
+    std::vector<Pt> pts = MakePoints(1000, info);
+    zt::Tensor in = PointTensor(pts);
+    zt::Tensor colrow;
+    analytic.lonlatalt_to_colrow(in, colrow);  // forward is method-independent
+    const std::vector<std::pair<double, double>> cr = ToPairs(colrow);
+
+    std::vector<std::array<double, 3>> crw(pts.size());
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        crw[i] = {cr[i].first, cr[i].second, pts[i].alt};
+    }
+    zt::Tensor crw_t = zt::from_blob(crw.data(),
+                                     {static_cast<int64_t>(crw.size()), 3},
+                                     zt::dtype(zt::kDouble));
+
+    zt::Tensor ll_a;
+    analytic.colrowalt_to_lonlat(crw_t, ll_a);
+    zt::Tensor ll_f;
+    affine.colrowalt_to_lonlat(crw_t, ll_f);
+
+    // Forward each recovered lon/lat back to pixels and measure the residual.
+    const auto roundtrip_err = [&](const zt::Tensor& ll) -> double {
+        const std::vector<std::pair<double, double>> pairs = ToPairs(ll);
+        std::vector<Pt> back(pts.size());
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            back[i] = Pt{pairs[i].first, pairs[i].second, pts[i].alt};
+        }
+        zt::Tensor back_t = PointTensor(back);
+        zt::Tensor back_cr;
+        analytic.lonlatalt_to_colrow(back_t, back_cr);
+        const std::vector<std::pair<double, double>> bcr = ToPairs(back_cr);
+        double max_err = 0.0;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            max_err = std::max(
+                max_err,
+                std::max(std::fabs(bcr[i].first - cr[i].first),
+                         std::fabs(bcr[i].second - cr[i].second)));
+        }
+        return max_err;
+    };
+
+    const double err_analytic = roundtrip_err(ll_a);
+    const double err_affine = roundtrip_err(ll_f);
+
+    EXPECT_LT(err_analytic, 1e-6) << "analytic must reach machine precision";
+    EXPECT_GT(err_affine, 1e-3) << "affine stays near its 0.1 px threshold";
+    EXPECT_LT(err_analytic, err_affine * 1e-3)
+        << "analytic should be >1000x tighter than affine";
+}
+
+TEST(RpcCpu, AnalyticInverseMatchesGdal) {
+    const RpcInfo info = MakeSyntheticInfo();
+    const RpcModel model(info, {1e-9, 20, InverseMethod::Analytic});
+    std::vector<Pt> pts = MakePoints(500, info);
+
+    zt::Tensor in = PointTensor(pts);
+    zt::Tensor colrow;
+    model.lonlatalt_to_colrow(in, colrow);
+    const std::vector<std::pair<double, double>> cr = ToPairs(colrow);
+
+    void* gdal = CreateGdalTransformer(info, 0.1);
+    ASSERT_NE(gdal, nullptr);
+
+    std::vector<double> x(cr.size());
+    std::vector<double> y(cr.size());
+    std::vector<double> z(pts.size());
+    std::vector<int> ok(pts.size(), 0);
+    for (std::size_t i = 0; i < cr.size(); ++i) {
+        x[i] = cr[i].first;
+        y[i] = cr[i].second;
+        z[i] = pts[i].alt;
+    }
+    const int ret = GDALRPCTransform(gdal,
+                                     FALSE,
+                                     static_cast<int>(cr.size()),
+                                     x.data(),
+                                     y.data(),
+                                     z.data(),
+                                     ok.data());
+    EXPECT_NE(ret, 0);
+
+    std::vector<std::array<double, 3>> crw(cr.size());
+    for (std::size_t i = 0; i < cr.size(); ++i) {
+        crw[i] = {cr[i].first, cr[i].second, pts[i].alt};
+    }
+    zt::Tensor crw_t = zt::from_blob(crw.data(),
+                                     {static_cast<int64_t>(crw.size()), 3},
+                                     zt::dtype(zt::kDouble));
+
+    zt::Tensor ll;
+    model.colrowalt_to_lonlat(crw_t, ll);
+    const std::vector<std::pair<double, double>> got = ToPairs(ll);
+
+    for (std::size_t i = 0; i < cr.size(); ++i) {
+        EXPECT_NEAR(got[i].first, x[i], kTolInverseDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(got[i].second, y[i], kTolInverseDeg)
+            << "point " << i << " lat";
+    }
+    GDALDestroyRPCTransformer(gdal);
+}
+
 TEST(RpcCpu, RealGeoEyeMatchesGdal) {
     // A real satellite RPC (GeoEye, vendored from the GDAL autotest suite):
     // validates the parser, the forward, and the iterative inverse against
@@ -646,6 +812,44 @@ TEST_F(RpcCudaTest, InverseMatchesCpu) {
         max_diff = std::max(max_diff, std::abs(a[i] - b[i]));
     }
     EXPECT_LT(max_diff, kTolInverseDeg);
+}
+
+TEST_F(RpcCudaTest, AnalyticInverseMatchesCpu) {
+    // Both paths use the analytic solver with a tight threshold, so they should
+    // agree far more closely than the affine kTolInverseDeg (1e-4 deg).
+    constexpr double kTolAnalyticAgree = 1e-7;  // deg
+    const RpcInfo info = MakeSyntheticInfo();
+    const RpcModel model(info, {1e-9, 20, InverseMethod::Analytic});
+    std::vector<Pt> pts = MakePoints(10000, info);
+
+    zt::Tensor cpu_in = PointTensor(pts);
+    zt::Tensor colrow;
+    model.lonlatalt_to_colrow(cpu_in, colrow);
+
+    std::vector<std::array<double, 3>> crw(pts.size());
+    const std::vector<std::pair<double, double>> cr = ToPairs(colrow);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        crw[i] = {cr[i].first, cr[i].second, pts[i].alt};
+    }
+    zt::Tensor crw_cpu = zt::from_blob(crw.data(),
+                                       {static_cast<int64_t>(crw.size()), 3},
+                                       zt::dtype(zt::kDouble));
+
+    zt::Tensor cpu_ll;
+    model.colrowalt_to_lonlat(crw_cpu, cpu_ll);
+
+    zt::Tensor gpu_ll;
+    model.colrowalt_to_lonlat(crw_cpu.cuda(), gpu_ll);
+
+    ASSERT_TRUE(gpu_ll.is_cuda());
+    const zt::Tensor gpu_ll_cpu = gpu_ll.cpu();
+    const double* a = cpu_ll.data_ptr<double>();
+    const double* b = gpu_ll_cpu.data_ptr<double>();
+    double max_diff = 0.0;
+    for (int64_t i = 0; i < 2 * static_cast<int64_t>(pts.size()); ++i) {
+        max_diff = std::max(max_diff, std::abs(a[i] - b[i]));
+    }
+    EXPECT_LT(max_diff, kTolAnalyticAgree);
 }
 
 TEST_F(RpcCudaTest, MixedCpuInCudaOutThrows) {

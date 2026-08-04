@@ -44,9 +44,11 @@
 
 namespace {
 
+using zproj::crs::InverseMethod;
 using zproj::crs::RpcInfo;
 using zproj::crs::RpcInfoFromRpcFile;
 using zproj::crs::RpcModel;
+using zproj::crs::RpcOptions;
 
 // ---------------------------------------------------------------------------
 // GDAL reference transformer.
@@ -275,10 +277,7 @@ int main(int argc, char** argv) {
                       {static_cast<int64_t>(crw.size()), 3},
                       zt::dtype(zt::kDouble));
 
-    zt::Tensor cpu_ll;
-    const double inv_cpu_ms =
-        BenchMs(reps, [&] { model.colrowalt_to_lonlat(crw_t, cpu_ll); });
-
+    // GDAL inverse reference (one pass).
     for (std::size_t i = 0; i < pts.size(); ++i) {
         gx[i] = cpu_cr[i].first;
         gy[i] = cpu_cr[i].second;
@@ -299,23 +298,110 @@ int main(int argc, char** argv) {
     const double gdal_inv_ms =
         std::chrono::duration<double, std::milli>(i1 - i0).count();
 
-    std::cout << "\n  col/row/alt -> lon/lat (inverse)\n";
-    std::cout << "  " << std::left << std::setw(28) << "backend" << std::right
-              << std::setw(12) << "ms/batch" << std::setw(12) << "Mpts/s"
-              << '\n';
-    PrintRow("zproj CPU", n, inv_cpu_ms);
-    PrintRow("GDAL (CPU ref)", n, gdal_inv_ms);
-
-    const std::vector<std::pair<double, double>> cpu_ll_v = ToPairs(cpu_ll);
     std::vector<std::pair<double, double>> gdal_ll_v(pts.size());
     for (std::size_t i = 0; i < pts.size(); ++i) {
         gdal_ll_v[i] = {gx[i], gy[i]};
     }
-    const MaxError inv_err = MaxDiff(cpu_ll_v, gdal_ll_v);
-    std::cout << "\nmax |zproj CPU - GDAL| (inverse) = lon " << std::scientific
-              << std::setprecision(3) << inv_err.first << " deg, lat "
-              << inv_err.second << " deg\n"
-              << std::defaultfloat;
+
+    // Round-trip pixel residual of a recovered lon/lat set: forward it back
+    // (method-independent) and compare pixels to the originals. This directly
+    // measures the inverse's accuracy.
+    const auto roundtrip_px = [&](const std::vector<std::pair<double, double>>& ll)
+        -> double {
+        // Non-converged points come back as HUGE_VAL; treat any non-finite
+        // recovered coordinate as a total failure rather than letting the NaN
+        // from forwarding it disappear through std::max(0.0, NaN) == 0.
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            if (!std::isfinite(ll[i].first) || !std::isfinite(ll[i].second)) {
+                return HUGE_VAL;
+            }
+        }
+        std::vector<Pt> back(pts.size());
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            back[i] = {ll[i].first, ll[i].second, pts[i].alt};
+        }
+        zt::Tensor back_t = PointTensor(back);
+        zt::Tensor back_cr;
+        model.lonlatalt_to_colrow(back_t, back_cr);
+        const std::vector<std::pair<double, double>> bcr = ToPairs(back_cr);
+        double worst = 0.0;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            worst = std::max(worst,
+                             std::max(std::fabs(bcr[i].first - cpu_cr[i].first),
+                                      std::fabs(bcr[i].second - cpu_cr[i].second)));
+        }
+        return worst;
+    };
+
+    // Inverse solver configs to compare. The affine solver with the GDAL
+    // default threshold is the baseline; tightening its threshold shows the
+    // linear-convergence plateau; the analytic solver reaches machine
+    // precision in few iterations.
+    struct InvConfig {
+        const char* name;
+        RpcOptions opts;
+    };
+    const std::array<InvConfig, 3> configs = {{
+        {"affine 0.1px/10 (GDAL def)", {0.1, 10, InverseMethod::AffineGdal}},
+        {"affine 1e-9px/60", {1e-9, 60, InverseMethod::AffineGdal}},
+        {"analytic 1e-9px/20", {1e-9, 20, InverseMethod::Analytic}},
+    }};
+
+    std::cout << "\n  col/row/alt -> lon/lat (inverse)\n";
+    std::cout << "  " << std::left << std::setw(28) << "CPU backend" << std::right
+              << std::setw(12) << "ms/batch" << std::setw(12) << "Mpts/s"
+              << std::setw(14) << "roundtrip px" << std::setw(16)
+              << "max|z-GDAL| deg" << '\n';
+    PrintRow("GDAL (CPU ref)", n, gdal_inv_ms);
+
+    // Keep each config's CPU result for the CUDA section to compare against.
+    std::vector<std::vector<std::pair<double, double>>> cpu_results;
+    cpu_results.reserve(configs.size());
+    for (const InvConfig& c : configs) {
+        const RpcModel m(info, c.opts);
+        zt::Tensor ll;
+        const double ms = BenchMs(reps, [&] { m.colrowalt_to_lonlat(crw_t, ll); });
+        const std::vector<std::pair<double, double>> ll_v = ToPairs(ll);
+        cpu_results.push_back(ll_v);
+        const double rt = roundtrip_px(ll_v);
+        const MaxError e = MaxDiff(ll_v, gdal_ll_v);
+        const double vs_gdal = std::max(e.first, e.second);
+        std::cout << "  " << std::left << std::setw(28) << c.name << std::right
+                  << std::setw(12) << std::fixed << std::setprecision(3) << ms
+                  << std::setw(12) << std::setprecision(3)
+                  << (static_cast<double>(n) / ms / 1e3) << std::setw(14)
+                  << std::scientific << std::setprecision(2) << rt << std::setw(16)
+                  << vs_gdal << std::defaultfloat << '\n';
+    }
+
+    // Minimum iterations for the WHOLE batch to converge: the smallest k at
+    // which the solver returns a finite result for EVERY point (i.e. each
+    // point's back-projection error dropped below the 1e-9 px threshold within
+    // k iterations). Checking for finite output (rather than re-forwarding and
+    // re-thresholding, which is noisy right at 1e-9) isolates the true
+    // convergence rate from per-iteration cost.
+    const auto min_iters = [&](InverseMethod method) -> int {
+        const std::array<int, 12> ladder = {
+            {1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 40, 60}};
+        for (int k : ladder) {
+            const RpcModel m(info, {1e-9, k, method});
+            zt::Tensor ll;
+            m.colrowalt_to_lonlat(crw_t, ll);
+            const std::vector<std::pair<double, double>> v = ToPairs(ll);
+            const bool all_converged =
+                std::all_of(v.begin(), v.end(), [](const std::pair<double, double>& p) {
+                    return std::isfinite(p.first) && std::isfinite(p.second);
+                });
+            if (all_converged) {
+                return k;
+            }
+        }
+        return 60;
+    };
+    std::cout << "\n  min iters for the whole batch to converge (<1e-9 px):\n"
+              << "    affine   = " << min_iters(InverseMethod::AffineGdal)
+              << "\n    analytic = " << min_iters(InverseMethod::Analytic)
+              << '\n';
 
 #ifdef BUILD_CUDA_MODULE
     if (HasCudaDevice()) {
@@ -352,37 +438,43 @@ int main(int argc, char** argv) {
                   << " px\n"
                   << std::defaultfloat;
 
+        // CUDA inverse: per-config sustained throughput + accuracy vs the CPU
+        // result of the same config.
         const zt::Tensor gpu_crw = crw_t.cuda();
-        zt::Tensor gpu_ll;
-        const double inv_cuda_call_ms = BenchMs(reps, [&] {
-            model.colrowalt_to_lonlat(gpu_crw, gpu_ll);
+        std::cout << "\n  CUDA inverse (sustained):\n";
+        std::cout << "  " << std::left << std::setw(28) << "backend" << std::right
+                  << std::setw(12) << "ms/batch" << std::setw(12) << "Mpts/s"
+                  << std::setw(14) << "roundtrip px" << std::setw(16)
+                  << "max|gpu-cpu| deg" << '\n';
+        for (std::size_t ci = 0; ci < configs.size(); ++ci) {
+            const RpcModel m(info, configs[ci].opts);
+            zt::Tensor gpu_ll;
+            for (int i = 0; i < reps; ++i) {
+                m.colrowalt_to_lonlat(gpu_crw, gpu_ll);
+            }
             cudaDeviceSynchronize();
-        });
-        for (int i = 0; i < reps; ++i) {
-            model.colrowalt_to_lonlat(gpu_crw, gpu_ll);
-        }
-        cudaDeviceSynchronize();
-        const auto si0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < reps; ++i) {
-            model.colrowalt_to_lonlat(gpu_crw, gpu_ll);
-        }
-        cudaDeviceSynchronize();
-        const auto si1 = std::chrono::steady_clock::now();
-        const double inv_cuda_sustained_ms =
-            std::chrono::duration<double, std::milli>(si1 - si0).count() / reps;
+            const auto c0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < reps; ++i) {
+                m.colrowalt_to_lonlat(gpu_crw, gpu_ll);
+            }
+            cudaDeviceSynchronize();
+            const auto c1 = std::chrono::steady_clock::now();
+            const double ms =
+                std::chrono::duration<double, std::milli>(c1 - c0).count() / reps;
 
-        std::cout << "\n  CUDA inverse:\n";
-        PrintRow("zproj CUDA (per-call sync)", n, inv_cuda_call_ms);
-        PrintRow("zproj CUDA (sustained)", n, inv_cuda_sustained_ms);
-
-        const std::vector<std::pair<double, double>> gpu_ll_v =
-            ToPairs(gpu_ll.cpu());
-        const MaxError gpu_inv_err = MaxDiff(gpu_ll_v, gdal_ll_v);
-        std::cout << "max |zproj CUDA - GDAL| (inverse) = lon "
-                  << std::scientific << std::setprecision(3)
-                  << gpu_inv_err.first << " deg, lat " << gpu_inv_err.second
-                  << " deg\n"
-                  << std::defaultfloat;
+            const std::vector<std::pair<double, double>> gpu_ll_v =
+                ToPairs(gpu_ll.cpu());
+            const double rt = roundtrip_px(gpu_ll_v);
+            const MaxError e = MaxDiff(gpu_ll_v, cpu_results[ci]);
+            const double vs_cpu = std::max(e.first, e.second);
+            std::cout << "  " << std::left << std::setw(28) << configs[ci].name
+                      << std::right << std::setw(12) << std::fixed
+                      << std::setprecision(3) << ms << std::setw(12)
+                      << std::setprecision(3)
+                      << (static_cast<double>(n) / ms / 1e3) << std::setw(14)
+                      << std::scientific << std::setprecision(2) << rt
+                      << std::setw(16) << vs_cpu << std::defaultfloat << '\n';
+        }
     } else {
         std::cout << "\n  (no CUDA device; skipping GPU section)\n";
     }

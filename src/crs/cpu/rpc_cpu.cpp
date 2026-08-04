@@ -45,15 +45,26 @@ void rpc_inverse_cpu(const RpcInfo& info,
     for (int64_t i = 0; i < num; ++i) {
         double lon = 0.0;
         double lat = 0.0;
-        const bool ok = rpc_inverse_point(info,
-                                          init,
-                                          in_ptr[(3 * i) + 0],
-                                          in_ptr[(3 * i) + 1],
-                                          in_ptr[(3 * i) + 2],
-                                          lon,
-                                          lat,
-                                          options.pixel_error_threshold,
-                                          options.max_iterations);
+        const bool ok =
+            (options.inverse_method == InverseMethod::Analytic)
+                ? rpc_inverse_point_analytic(info,
+                                             init,
+                                             in_ptr[(3 * i) + 0],
+                                             in_ptr[(3 * i) + 1],
+                                             in_ptr[(3 * i) + 2],
+                                             lon,
+                                             lat,
+                                             options.pixel_error_threshold,
+                                             options.max_iterations)
+                : rpc_inverse_point(info,
+                                    init,
+                                    in_ptr[(3 * i) + 0],
+                                    in_ptr[(3 * i) + 1],
+                                    in_ptr[(3 * i) + 2],
+                                    lon,
+                                    lat,
+                                    options.pixel_error_threshold,
+                                    options.max_iterations);
         if (ok) {
             dst_ptr[(2 * i) + 0] = lon;
             dst_ptr[(2 * i) + 1] = lat;

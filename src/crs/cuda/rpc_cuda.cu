@@ -30,20 +30,32 @@ __global__ void rpc_inverse_kernel(const zproj::crs::RpcInfo info,
                                    double* out,
                                    double pixel_error_threshold,
                                    int max_iterations,
+                                   zproj::crs::InverseMethod inverse_method,
                                    unsigned int num) {
     const unsigned int idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx < num) {
         double lon = 0.0;
         double lat = 0.0;
-        const bool ok = zproj::crs::rpc_inverse_point(info,
-                                                      init,
-                                                      in[3 * idx],
-                                                      in[3 * idx + 1],
-                                                      in[3 * idx + 2],
-                                                      lon,
-                                                      lat,
-                                                      pixel_error_threshold,
-                                                      max_iterations);
+        const bool ok =
+            (inverse_method == zproj::crs::InverseMethod::Analytic)
+                ? zproj::crs::rpc_inverse_point_analytic(info,
+                                                         init,
+                                                         in[3 * idx],
+                                                         in[3 * idx + 1],
+                                                         in[3 * idx + 2],
+                                                         lon,
+                                                         lat,
+                                                         pixel_error_threshold,
+                                                         max_iterations)
+                : zproj::crs::rpc_inverse_point(info,
+                                                init,
+                                                in[3 * idx],
+                                                in[3 * idx + 1],
+                                                in[3 * idx + 2],
+                                                lon,
+                                                lat,
+                                                pixel_error_threshold,
+                                                max_iterations);
         if (ok) {
             out[2 * idx] = lon;
             out[2 * idx + 1] = lat;
@@ -111,6 +123,7 @@ void rpc_inverse_cuda(const RpcInfo& info,
         dst.data_ptr<double>(),
         options.pixel_error_threshold,
         options.max_iterations,
+        options.inverse_method,
         static_cast<unsigned int>(num));
     ZT_CUDA_GET_LAST_ERROR("rpc_inverse_kernel launch failed");
 }
