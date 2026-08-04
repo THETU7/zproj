@@ -13,9 +13,9 @@
 #include <string>
 #include <string_view>
 
-#include "zproj/rpc/rpc.hpp"
+#include "zproj/crs/rpc.hpp"
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 // Parse RPC metadata text into RpcInfo. Throws std::runtime_error on missing
 // required fields or malformed numbers.
@@ -25,4 +25,4 @@ RpcInfo RpcInfoFromRpcText(std::string_view text);
 // Throws std::runtime_error on I/O or parse failures.
 RpcInfo RpcInfoFromRpcFile(const std::string& path);
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

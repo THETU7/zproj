@@ -44,10 +44,9 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 # ---------------------------------------------------------------------------
-# Eigen (system install). The vendored master Eigen was removed: the parts of
-# zproj that needed its GPU/Tensor modules are commented out (see
-# examples/eigen_gpu) and will be reimplemented on top of the vendored
-# ztensor instead.
+# Eigen (system install), used for plain host-side math only. GPU/tensor
+# acceleration goes through the vendored ztensor (CUDA tensors), not Eigen's
+# GPU/Tensor modules.
 # ---------------------------------------------------------------------------
 find_package(Eigen3 CONFIG REQUIRED)
 
@@ -108,10 +107,10 @@ add_library(zproj STATIC
     src/crs/ecef_to_wgs84.cpp
     src/crs/cpu/ecef_to_wgs84_cpu.cpp
     src/crs/cuda/ecef_to_wgs84_cuda.cu
-    src/rpc/rpc.cpp
-    src/rpc/cpu/rpc_cpu.cpp
-    src/rpc/cuda/rpc_cuda.cu
-    src/rpc/rpc_io.cpp
+    src/crs/rpc.cpp
+    src/crs/cpu/rpc_cpu.cpp
+    src/crs/cuda/rpc_cuda.cu
+    src/crs/rpc_io.cpp
 )
 add_library(zproj::zproj ALIAS zproj)
 

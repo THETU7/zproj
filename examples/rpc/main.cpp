@@ -35,8 +35,8 @@
 #include <cuda_runtime.h>
 #endif  // BUILD_CUDA_MODULE
 
-#include "zproj/rpc/rpc.hpp"
-#include "zproj/rpc/rpc_io.hpp"
+#include "zproj/crs/rpc.hpp"
+#include "zproj/crs/rpc_io.hpp"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/TensorFactories.h"
@@ -44,9 +44,9 @@
 
 namespace {
 
-using zproj::rpc::RpcInfo;
-using zproj::rpc::RpcInfoFromRpcFile;
-using zproj::rpc::RpcModel;
+using zproj::crs::RpcInfo;
+using zproj::crs::RpcInfoFromRpcFile;
+using zproj::crs::RpcModel;
 
 // ---------------------------------------------------------------------------
 // GDAL reference transformer.

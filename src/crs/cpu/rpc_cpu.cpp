@@ -2,9 +2,9 @@
 
 #include "ztensor/zt/Tensor.h"
 
-#include "rpc/rpc.h"
+#include "crs/rpc.h"
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 void rpc_forward_cpu(const RpcInfo& info,
                      const zt::Tensor& in,
@@ -65,4 +65,4 @@ void rpc_inverse_cpu(const RpcInfo& info,
     }
 }
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

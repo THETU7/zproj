@@ -7,9 +7,9 @@
 //   * ECEF:     (x, y, z)     -- metres
 //
 // Everything here is usable from both host (plain C++) and device (CUDA)
-// translation units. The ZPROJ_HD macro expands to __host__ __device__ under
-// nvcc and to nothing otherwise, so the identical math is shared between the
-// GPU kernel and any host-side reference implementation.
+// translation units. The ZT_HOST_DEVICE macro expands to __host__ __device__
+// under nvcc and to nothing otherwise, so the identical math is shared between
+// the GPU kernel and any host-side reference implementation.
 #pragma once
 
 #include <cmath>

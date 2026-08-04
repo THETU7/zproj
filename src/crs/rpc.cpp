@@ -7,7 +7,7 @@
 #include "ztensor/zt/TensorFactories.h"
 #include "ztensor/zt/utility/Log.h"
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 namespace {
 
@@ -151,4 +151,4 @@ void RpcModel::colrowalt_to_lonlat(const zt::Tensor& in,
                  dst.device().string());
 }
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

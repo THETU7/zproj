@@ -8,9 +8,10 @@ A learning project for **CUDA-accelerated coordinate transformations**
 (PROJ-style): rewrite common GDAL/PROJ operations (e.g. WGS84 geodetic →
 ECEF) on the GPU and compare them against the GDAL/PROJ reference.
 
-- Namespace: `zproj` (`zproj::crs::Geodetic`, `zproj::crs::wgs84_to_ecef`, ...).
+- Namespace: `zproj` (`zproj::crs::Geodetic`, `zproj::crs::wgs84_to_ecef`,
+  `zproj::crs::RpcModel`, ...).
 - C++20 + CUDA; GDAL/PROJ is the CPU reference/ground truth, CUDA kernels are
-  the fast path. The transform math is shared host/device via `ZPROJ_HD`
+  the fast path. The transform math is shared host/device via `ZT_HOST_DEVICE`
   (`include/zproj/crs/wgs84.hpp`).
 - Tensor work (GPU buffers, matmul, reductions, future acceleration) is done
   on the **vendored ztensor**, never directly on Eigen's GPU/Tensor modules.
@@ -48,13 +49,6 @@ this repo (llama.cpp-style ggml integration) so it can be edited in place.
   DESIGN.md — read those before touching vendored code.
 - The vendored ztensor builds with the same strict warnings
   (`ZT_WARNINGS_AS_ERRORS` follows `ZPROJ_WARNINGS_AS_ERRORS`).
-
-## Disabled Eigen GPU/Tensor work
-
-`examples/eigen_gpu/` is commented out: it needed the vendored master Eigen's
-GPU/Tensor modules, which have been removed along with the vendored Eigen.
-Reimplement anything it covered with ztensor CUDA tensors (see
-`examples/ztensor_basic/main.cpp`, `tests/test_ztensor.cpp`).
 
 ## Build & test
 

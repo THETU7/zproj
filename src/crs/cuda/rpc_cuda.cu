@@ -5,11 +5,11 @@
 #include "ztensor/zt/cuda/Stream.h"
 #include "ztensor/zt/utility/Log.h"
 
-#include "rpc/rpc.h"
+#include "crs/rpc.h"
 
 namespace {
 
-__global__ void rpc_forward_kernel(const zproj::rpc::RpcInfo info,
+__global__ void rpc_forward_kernel(const zproj::crs::RpcInfo info,
                                    const double* in,
                                    double* out,
                                    unsigned int num) {
@@ -17,15 +17,15 @@ __global__ void rpc_forward_kernel(const zproj::rpc::RpcInfo info,
     if (idx < num) {
         double col = 0.0;
         double row = 0.0;
-        zproj::rpc::rpc_forward_point(
+        zproj::crs::rpc_forward_point(
             info, in[3 * idx], in[3 * idx + 1], in[3 * idx + 2], col, row);
         out[2 * idx] = col;
         out[2 * idx + 1] = row;
     }
 }
 
-__global__ void rpc_inverse_kernel(const zproj::rpc::RpcInfo info,
-                                   const zproj::rpc::RpcInverseInit init,
+__global__ void rpc_inverse_kernel(const zproj::crs::RpcInfo info,
+                                   const zproj::crs::RpcInverseInit init,
                                    const double* in,
                                    double* out,
                                    double pixel_error_threshold,
@@ -35,7 +35,7 @@ __global__ void rpc_inverse_kernel(const zproj::rpc::RpcInfo info,
     if (idx < num) {
         double lon = 0.0;
         double lat = 0.0;
-        const bool ok = zproj::rpc::rpc_inverse_point(info,
+        const bool ok = zproj::crs::rpc_inverse_point(info,
                                                       init,
                                                       in[3 * idx],
                                                       in[3 * idx + 1],
@@ -56,7 +56,7 @@ __global__ void rpc_inverse_kernel(const zproj::rpc::RpcInfo info,
 
 }  // namespace
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 void rpc_forward_cuda(const RpcInfo& info,
                       const zt::Tensor& in,
@@ -115,4 +115,4 @@ void rpc_inverse_cuda(const RpcInfo& info,
     ZT_CUDA_GET_LAST_ERROR("rpc_inverse_kernel launch failed");
 }
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

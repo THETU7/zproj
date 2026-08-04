@@ -1,4 +1,4 @@
-#include "zproj/rpc/rpc_io.hpp"
+#include "zproj/crs/rpc_io.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 namespace {
 
@@ -164,4 +164,4 @@ RpcInfo RpcInfoFromRpcFile(const std::string& path) {
     return RpcInfoFromRpcText(text);
 }
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

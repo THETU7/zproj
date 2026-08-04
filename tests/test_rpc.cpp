@@ -1,6 +1,6 @@
 // tests/test_rpc.cpp
 //
-// Unit tests for zproj::rpc::RpcModel (the ztensor-backed RPC transformer).
+// Unit tests for zproj::crs::RpcModel (the ztensor-backed RPC transformer).
 //
 // Built against the system GoogleTest (find_package(GTest CONFIG), never
 // vendored). The CPU path always runs; the CUDA path runs only when a
@@ -30,8 +30,8 @@
 #include <cuda_runtime.h>
 #endif  // BUILD_CUDA_MODULE
 
-#include "zproj/rpc/rpc.hpp"
-#include "zproj/rpc/rpc_io.hpp"
+#include "zproj/crs/rpc.hpp"
+#include "zproj/crs/rpc_io.hpp"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/Tensor.h"
 #include "ztensor/zt/TensorFactories.h"
@@ -39,11 +39,11 @@
 
 namespace {
 
-using zproj::rpc::rpc_forward_point;
-using zproj::rpc::RpcInfo;
-using zproj::rpc::RpcInfoFromRpcFile;
-using zproj::rpc::RpcModel;
-using zproj::rpc::RpcOptions;
+using zproj::crs::rpc_forward_point;
+using zproj::crs::RpcInfo;
+using zproj::crs::RpcInfoFromRpcFile;
+using zproj::crs::RpcModel;
+using zproj::crs::RpcOptions;
 
 constexpr double kTolColRow = 1e-6;    // px, forward vs reference / GDAL
 constexpr double kTolAnalytic = 1e-9;  // px, identity model

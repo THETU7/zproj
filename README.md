@@ -41,17 +41,13 @@ zproj/
 │   ├── push-ztensor.sh        #   vendored changes -> upstream ztensor checkout
 │   └── sync-ztensor.sh        #   upstream ztensor checkout -> vendored copy
 ├── include/zproj/           # public headers
-│   ├── crs/                 #   wgs84 constants + geodetic/ECEF types + math
-│   └── rpc/                 #   RPC sensor model (coefficients + transforms + I/O)
+│   └── crs/                 #   wgs84 + RPC: constants, types, math, transforms, I/O
 ├── src/                     # library sources (.cu kernels + host wrappers)
-│   ├── crs/                 #   wgs84 <-> ecef implementations
-│   ├── rpc/                 #   RPC forward/inverse implementations
-│   └── zproj/cuda/          #   private CUDA helpers (error checking)
+│   └── crs/                 #   wgs84 <-> ecef + RPC forward/inverse (cpu/ + cuda/)
 ├── examples/                # runnable demos
 │   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernels (both ways) + timing
 │   ├── rpc/                 #   RPC forward/inverse vs GDAL on a real satellite RPC
-│   ├── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
-│   └── eigen_gpu/            #   DISABLED (needed vendored-master Eigen GPU/Tensor)
+│   └── ztensor_basic/        #   vendored ztensor CPU + CUDA smoke
 └── tests/                   # analytic smoke tests (CTest)
 ```
 
@@ -60,8 +56,8 @@ zproj/
 - **Reference path** is GDAL/PROJ on the CPU (e.g. EPSG:4326 → EPSG:4978). It is
   the ground truth the GPU kernel is validated against.
 - **Fast path** is a CUDA kernel. The geodetic ↔ ECEF math (forward +
-  Bowring-method inverse) is identical on host and device (see `ZPROJ_HD` in
-  `wgs84.hpp`), so the CPU reference and the GPU kernel cannot drift apart.
+  Bowring-method inverse) is identical on host and device (see `ZT_HOST_DEVICE`
+  in `wgs84.hpp`), so the CPU reference and the GPU kernel cannot drift apart.
 - **Eigen** (system install) is used only for plain host-side math (error
   norms, etc.). GPU/tensor acceleration is provided by the vendored ztensor
   instead — see the ztensor section below.
@@ -132,17 +128,12 @@ reference path and CUDA kernels that agree to ~1e-8 m. The vendored ztensor
 builds with its CUDA backend and is exercised by `examples/ztensor_basic` +
 `tests/test_ztensor`.
 
-The RPC sensor model (`zproj::rpc`) implements the forward
+The RPC sensor model (`zproj::crs`) implements the forward
 `lon/lat/alt -> col/row` and the iterative `col/row/alt -> lon/lat` transforms
 (GDAL's GDALRPCTransformer, no DEM -- heights are always supplied by the
 caller), with host/device-shared math, CPU + CUDA paths, an RPC text-file
 parser (`rpc_io`), and a GDAL cross-check on a real GeoEye RPC
 (`examples/rpc`, `tests/test_rpc.cpp`).
-
-The former Eigen GPU/Tensor demo (`examples/eigen_gpu`) is commented out:
-it required the vendored master Eigen, which has been removed in favor of the
-system Eigen. Its functionality is planned to be reimplemented on top of
-ztensor (CUDA tensors).
 
 The convenience `wgs84_to_ecef()` wrapper currently shows ~1× vs the CPU
 reference because the single launch is dominated by `cudaMalloc` + H2D/D2H

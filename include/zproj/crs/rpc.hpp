@@ -30,7 +30,7 @@
 #include "ztensor/zt/Macros.h"
 #include "ztensor/zt/Tensor.h"
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 // Number of coefficients in each RPC rational polynomial: the 20 cubic
 // monomials over (lon, lat, height) -- 1, L, P, H, LP, LH, PH, L2, P2, H2,
@@ -229,4 +229,4 @@ private:
     RpcInverseInit inverse_init_;
 };
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs

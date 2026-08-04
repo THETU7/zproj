@@ -1,8 +1,8 @@
 #pragma once
 
-#include "zproj/rpc/rpc.hpp"
+#include "zproj/crs/rpc.hpp"
 
-namespace zproj::rpc {
+namespace zproj::crs {
 
 void rpc_forward_cpu(const RpcInfo& info,
                      const zt::Tensor& in,
@@ -24,4 +24,4 @@ void rpc_inverse_cuda(const RpcInfo& info,
                       zt::Tensor& dst);
 #endif  // BUILD_CUDA_MODULE
 
-}  // namespace zproj::rpc
+}  // namespace zproj::crs
