@@ -21,3 +21,10 @@ target_compile_definitions(rpc PRIVATE
 # Vendored ztensor (third_party/ztensor): CPU + CUDA tensor-ops smoke.
 add_executable(ztensor_basic ztensor_basic/main.cpp)
 target_link_libraries(ztensor_basic PRIVATE zt::ztensor CUDA::cudart)
+
+# RPC stereo triangulation: back-project a matched pixel pair to viewing rays
+# and intersect them. Synthetic nadir + oblique pair (no data file needed):
+# reports CPU/CUDA throughput, closed-loop accuracy vs known ground truth, and
+# a ray-height-span accuracy sweep.
+add_executable(triangulation triangulation/main.cpp)
+target_link_libraries(triangulation PRIVATE zproj)
