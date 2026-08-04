@@ -111,6 +111,9 @@ add_library(zproj STATIC
     src/crs/cpu/rpc_cpu.cpp
     src/crs/cuda/rpc_cuda.cu
     src/crs/rpc_io.cpp
+    src/crs/triangulation.cpp
+    src/crs/cpu/triangulation_cpu.cpp
+    src/crs/cuda/triangulation_cuda.cu
 )
 add_library(zproj::zproj ALIAS zproj)
 

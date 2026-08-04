@@ -41,9 +41,9 @@ zproj/
 │   ├── push-ztensor.sh        #   vendored changes -> upstream ztensor checkout
 │   └── sync-ztensor.sh        #   upstream ztensor checkout -> vendored copy
 ├── include/zproj/           # public headers
-│   └── crs/                 #   wgs84 + RPC: constants, types, math, transforms, I/O
+│   └── crs/                 #   wgs84 + RPC: constants, types, math, transforms, triangulation
 ├── src/                     # library sources (.cu kernels + host wrappers)
-│   └── crs/                 #   wgs84 <-> ecef + RPC forward/inverse (cpu/ + cuda/)
+│   └── crs/                 #   wgs84 <-> ecef + RPC forward/inverse/triangulation (cpu/ + cuda/)
 ├── examples/                # runnable demos
 │   ├── wgs84_to_ecef/       #   GDAL reference vs CUDA kernels (both ways) + timing
 │   ├── rpc/                 #   RPC forward/inverse vs GDAL on a real satellite RPC
@@ -134,6 +134,13 @@ The RPC sensor model (`zproj::crs`) implements the forward
 caller), with host/device-shared math, CPU + CUDA paths, an RPC text-file
 parser (`rpc_io`), and a GDAL cross-check on a real GeoEye RPC
 (`examples/rpc`, `tests/test_rpc.cpp`).
+
+RPC stereo triangulation (`zproj::crs::RpcStereo`) back-projects a matched
+pixel pair through the analytic inverse at two heights to build viewing rays
+(`rpc_ray`), intersects them (`triangulate_pair`, plus a pointwise
+`triangulate_nview` for N rays), and reports the geodetic point plus an
+error metric -- the same ray/intersection math as ASP / VisionWorkbench,
+shared host/device with CPU + CUDA paths (`tests/test_triangulation.cpp`).
 
 The convenience `wgs84_to_ecef()` wrapper currently shows ~1× vs the CPU
 reference because the single launch is dominated by `cudaMalloc` + H2D/D2H
