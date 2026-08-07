@@ -43,7 +43,7 @@
 #endif  // _OPENMP
 
 #ifdef BUILD_CUDA_MODULE
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Guard.h"
 #endif  // BUILD_CUDA_MODULE
 
 #include "zproj/crs/ecef_to_wgs84.hpp"
@@ -213,10 +213,7 @@ void PrintRow(const char* name, std::size_t n, double ms) {
 }
 
 #ifdef BUILD_CUDA_MODULE
-bool HasCudaDevice() {
-    int n_devices = 0;
-    return cudaGetDeviceCount(&n_devices) == cudaSuccess && n_devices > 0;
-}
+bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
 
 std::string CudaDeviceName() {
     cudaDeviceProp prop;
@@ -231,15 +228,26 @@ std::string CudaDeviceName() {
 // device's peak bandwidth. Approximate; real GDDR clocks vary.
 double MemFloorMs(std::size_t n) {
     // CUDA 13 removed memoryClockRate/memoryBusWidth from cudaDeviceProp, so
-    // query the equivalent device attributes instead.
+    // query the equivalent device attributes instead. The vendor shim remaps
+    // cuda* -> hip* for the HIP backend, but cudaDeviceGetAttribute is not
+    // part of the shim, so spell the HIP branch explicitly.
     int clock_khz = 0;
     int bus_bits = 0;
+#ifdef BUILD_HIP_MODULE
+    if (hipDeviceGetAttribute(&clock_khz, hipDevAttrMemoryClockRate, 0) !=
+            hipSuccess ||
+        hipDeviceGetAttribute(&bus_bits, hipDevAttrGlobalMemoryBusWidth, 0) !=
+            hipSuccess) {
+        return 0.0;
+    }
+#else
     if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrMemoryClockRate, 0) !=
             cudaSuccess ||
         cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, 0) !=
             cudaSuccess) {
         return 0.0;
     }
+#endif
     const double bw_bytes_s = 2.0 * static_cast<double>(clock_khz) * 1e3 *
                               static_cast<double>(bus_bits) / 8.0;
     const double bytes = 2.0 * 24.0 * static_cast<double>(n);

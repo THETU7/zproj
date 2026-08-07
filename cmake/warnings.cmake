@@ -1,10 +1,14 @@
 # warnings.cmake
 #
-# Strict warning flags for every zproj target across CXX and CUDA, adopted
-# from ztensor's cmake/ZtWarnings.cmake ("abort on warning" philosophy):
+# Strict warning flags for every zproj target across CXX, CUDA and HIP,
+# adopted from ztensor's cmake/ZtWarnings.cmake ("abort on warning"
+# philosophy):
 #   - GCC/Clang CXX: -Wall -Wextra (-Wno-unused-parameter) [-Werror]
 #   - NVCC: host flags travel via -Xcompiler; treat cross-execution-space-call
 #           as an error; enable relaxed-constexpr and extended-lambda.
+#   - hip-clang (HIP): clang front-end, so the same -Wall -Wextra -Werror
+#           set as CXX applies directly; relaxed constexpr / extended
+#           lambdas are native to hip-clang and need no flags.
 #
 # The flags are exposed through an INTERFACE helper target `zproj::warnings`
 # so that each target (and downstream consumers) inherits them via a single
@@ -32,10 +36,19 @@ if(NOT TARGET zproj::warnings)
             ${_zproj_cxx_werror}
             -Wno-unused-parameter
         >
+        # ---- hip-clang (HIP) ----
+        # HIP is only enabled for the ROCm backend; gate on the compiler
+        # being present rather than a sub-project option.
+        $<$<COMPILE_LANG_AND_ID:HIP,GNU,Clang>:
+            -Wall
+            -Wextra
+            ${_zproj_cxx_werror}
+            -Wno-unused-parameter
+        >
     )
 
-    # zproj always builds CUDA (project LANGUAGES includes CUDA); gate on
-    # the compiler being present rather than a sub-project option.
+    # The CUDA backend is opt-in (ZPROJ_ZTENSOR_CUDA); gate on the compiler
+    # being present rather than a sub-project option.
     if(CMAKE_CUDA_COMPILER)
         # Build the comma-separated -Xcompiler host-flags list once. NVCC
         # expects a single -Xcompiler=a,b,c argument; we cannot rely on

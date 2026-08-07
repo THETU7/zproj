@@ -15,7 +15,7 @@
 #include "ztensor/zt/utility/Log.h"
 
 #ifdef BUILD_CUDA_MODULE
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Guard.h"
 #endif
 
 int main() {
@@ -38,8 +38,7 @@ int main() {
 
 #ifdef BUILD_CUDA_MODULE
     // ---- CUDA: transfer, add, reduction, copy back ----
-    int n_devices = 0;
-    if (cudaGetDeviceCount(&n_devices) == cudaSuccess && n_devices > 0) {
+    if (zt::cuda::IsAvailable()) {
         const auto a = zt::arange(0.0, 6.0, 1.0, zt::dtype(zt::kFloat))
                            .reshape({2, 3})
                            .cuda();

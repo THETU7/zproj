@@ -25,7 +25,7 @@
 #include <gtest/gtest.h>
 
 #ifdef BUILD_CUDA_MODULE
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Guard.h"
 #endif  // BUILD_CUDA_MODULE
 
 #include "zproj/crs/rpc.hpp"
@@ -168,10 +168,7 @@ double EcefDist(const Ecef& a, const Ecef& b) {
 }
 
 #ifdef BUILD_CUDA_MODULE
-bool HasCudaDevice() {
-    int n_devices = 0;
-    return cudaGetDeviceCount(&n_devices) == cudaSuccess && n_devices > 0;
-}
+bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
 #endif  // BUILD_CUDA_MODULE
 
 // ============================== CPU path ================================

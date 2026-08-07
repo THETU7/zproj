@@ -23,7 +23,7 @@ include(GoogleTest)
 gtest_discover_tests(test_rpc)
 
 add_executable(test_ztensor test_ztensor.cpp)
-target_link_libraries(test_ztensor PRIVATE zt::ztensor CUDA::cudart)
+target_link_libraries(test_ztensor PRIVATE zt::ztensor ${_zproj_gpu_runtime})
 add_test(NAME zproj.ztensor COMMAND test_ztensor)
 
 add_executable(test_triangulation test_triangulation.cpp)

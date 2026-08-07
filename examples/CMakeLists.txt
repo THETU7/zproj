@@ -18,9 +18,9 @@ target_link_libraries(rpc PRIVATE zproj GDAL::GDAL)
 target_compile_definitions(rpc PRIVATE
     ZPROJ_RPC_DATA="${CMAKE_CURRENT_SOURCE_DIR}/rpc/data/md_ge_rgb_0010000_rpc.txt")
 
-# Vendored ztensor (third_party/ztensor): CPU + CUDA tensor-ops smoke.
+# Vendored ztensor (third_party/ztensor): CPU + GPU tensor-ops smoke.
 add_executable(ztensor_basic ztensor_basic/main.cpp)
-target_link_libraries(ztensor_basic PRIVATE zt::ztensor CUDA::cudart)
+target_link_libraries(ztensor_basic PRIVATE zt::ztensor ${_zproj_gpu_runtime})
 
 # RPC stereo triangulation: back-project a matched pixel pair to viewing rays
 # and intersect them. Synthetic nadir + oblique pair (no data file needed):

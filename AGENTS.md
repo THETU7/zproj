@@ -61,13 +61,16 @@ ctest --preset default
 ./build/default/bin/ztensor_basic   # vendored ztensor smoke (CPU + CUDA)
 ```
 
-- CUDA is required (project `LANGUAGES C CXX CUDA`); the committed presets
-  are machine-independent and auto-detect host compiler and GPU arch.
+- The GPU backend is CUDA by default (`ZPROJ_ZTENSOR_CUDA=ON`) with AMD
+  ROCm/HIP as the alternative (`-DZPROJ_ZTENSOR_HIP=ON`, mutually exclusive);
+  with both off the build is CPU-only. The committed presets are
+  machine-independent and auto-detect host compiler and GPU arch.
   Machine-specific pins (gcc-15/g++-15 as host compilers, g++-15 as the nvcc
   host compiler, `CMAKE_CUDA_ARCHITECTURES=native`) live in the gitignored
   `CMakeUserPresets.json` — use `cmake --preset local` (plus
-  `--build --preset local` / `ctest --preset local`) for the GPU-tuned build.
-- CUDA-dependent tests/examples skip gracefully when no CUDA-capable device
+  `--build --preset local` / `ctest --preset local`) for the GPU-tuned build,
+  and `local-rocm` for the ROCm/HIP build.
+- GPU-dependent tests/examples skip gracefully when no GPU-capable device
   is present (e.g. `zproj.ztensor`, `ztensor_basic`).
 - Before finishing work: clang-format clean, `-Werror` clean, `ctest` green,
   conventional-commit message.

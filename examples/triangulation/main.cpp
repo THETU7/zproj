@@ -24,7 +24,7 @@
 #include <vector>
 
 #ifdef BUILD_CUDA_MODULE
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Guard.h"
 #endif  // BUILD_CUDA_MODULE
 
 #include "zproj/crs/rpc.hpp"
@@ -151,10 +151,7 @@ Acc ClosedLoopError(const zt::Tensor& lonlath,
 }
 
 #ifdef BUILD_CUDA_MODULE
-bool HasCudaDevice() {
-    int n = 0;
-    return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
-}
+bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
 #endif  // BUILD_CUDA_MODULE
 
 }  // namespace

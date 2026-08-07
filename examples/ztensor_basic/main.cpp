@@ -16,7 +16,7 @@
 #include "ztensor/zt/utility/Log.h"
 
 #ifdef BUILD_CUDA_MODULE
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Guard.h"
 #endif
 
 int main() {
@@ -32,9 +32,7 @@ int main() {
 
 #ifdef BUILD_CUDA_MODULE
     // ---- CUDA round-trip: build on CPU, add on GPU, copy back ----
-    int n_devices = 0;
-    const auto err = cudaGetDeviceCount(&n_devices);
-    if (err != cudaSuccess || n_devices == 0) {
+    if (!zt::cuda::IsAvailable()) {
         std::cout << "no CUDA-capable device found; skipping CUDA checks\n";
         return 0;
     }

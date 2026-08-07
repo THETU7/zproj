@@ -1,20 +1,23 @@
 # zproj
 
-A learning project for **CUDA-accelerated coordinate transformations**. The core
+A learning project for **GPU-accelerated coordinate transformations** (NVIDIA CUDA
+and AMD ROCm). The core
 idea is to rewrite common [PROJ](https://proj.org/)/[GDAL](https://gdal.org/)
 coordinate operations (e.g. WGS84 geodetic ↔ ECEF) on the GPU and compare them
 against the GDAL/PROJ reference.
 
-Toolchain: **C++20 · CMake · GDAL (wraps PROJ) · CUDA · Eigen (system) ·
-ztensor (vendored)**.
+Toolchain: **C++20 · CMake · GDAL (wraps PROJ) · CUDA or HIP/ROCm ·
+Eigen (system) · ztensor (vendored)**.
 
 ## Build
 
-GDAL, PROJ, CUDA (nvcc), **spdlog**, a recent GCC, and system Eigen are
-expected on the system (spdlog is required by the vendored ztensor).
-The CMake preset pins **g++-15** as both the host C++ compiler and the nvcc
-host compiler (CUDA 13.2 does not yet accept GCC 16), and lets CMake
-auto-detect the local GPU architecture (`native`).
+GDAL, PROJ, a GPU toolchain (nvcc for CUDA, or ROCm's hipcc/hipBLAS/rocBLAS
+for HIP), **spdlog**, a recent GCC, and system Eigen are expected on the
+system (spdlog is required by the vendored ztensor). The committed presets
+are machine-independent and auto-detect the host compiler and GPU
+architecture. Machine-specific pins (g++-15 as host/nvcc-host compiler,
+`native` GPU arch) live in the gitignored `CMakeUserPresets.json`
+(`--preset local`).
 
 ```bash
 cmake --preset default
@@ -25,16 +28,36 @@ ctest --preset default                 # unit tests
 ./build/default/bin/ztensor_basic      # vendored ztensor (CPU + CUDA) smoke
 ```
 
-CUDA-dependent tests/examples skip gracefully when no CUDA-capable device is
-present (e.g. `zproj.ztensor`). Debug build:
+GPU-dependent tests/examples skip gracefully when no GPU device is present
+(e.g. `zproj.ztensor`). Debug build:
 `cmake --preset debug && cmake --build --preset debug`.
+
+## ROCm / HIP build
+
+The GPU backend is selectable through two mutually exclusive options:
+`ZPROJ_ZTENSOR_CUDA` (default ON) or `ZPROJ_ZTENSOR_HIP` (OFF by default).
+With HIP enabled, zproj's kernels and the vendored ztensor are compiled by
+hip-clang, and the `cuda*` -> `hip*` symbol remap is provided by the vendored
+ztensor's `cuda/Vendor.h` shim. On a ROCm machine:
+
+```bash
+cmake -B build/rocm -G Ninja \
+    -DZPROJ_ZTENSOR_CUDA=OFF -DZPROJ_ZTENSOR_HIP=ON \
+    -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15 \
+    -DCMAKE_HIP_ARCHITECTURES=native
+cmake --build build/rocm
+ctest --test-dir build/rocm
+```
+
+(`local-rocm` is provided as a ready-made user preset in the gitignored
+`CMakeUserPresets.json`.)
 
 ## Layout
 
 ```
 zproj/
-├── CMakeLists.txt          # C++20 + CUDA, GDAL, system Eigen, vendored ztensor
-├── CMakePresets.json        # g++-15 / nvcc, native GPU arch
+├── CMakeLists.txt          # C++20 + CUDA/HIP, GDAL, system Eigen, vendored ztensor
+├── CMakePresets.json        # machine-independent presets (compiler/GPU auto-detected)
 ├── AGENTS.md                # code style & constraints (adopted from ztensor)
 ├── third_party/ztensor/      # vendored ztensor source (editable in-tree)
 ├── scripts/                   # ztensor <-> zproj sync helpers
