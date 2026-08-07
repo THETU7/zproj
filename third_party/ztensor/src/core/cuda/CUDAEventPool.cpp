@@ -5,6 +5,7 @@
 
 #include "core/cuda/CUDAEventPool.h"
 
+#include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK_SOFT
 #include "ztensor/zt/utility/Log.h"
 
 namespace zt {
@@ -48,7 +49,7 @@ void CudaEventPool::release(cudaEvent_t event) {
             return;
         }
     }
-    cudaEventDestroy(event);
+    ZT_CUDA_CHECK_SOFT(cudaEventDestroy(event));
 }
 
 // ── shutdown ─────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ void CudaEventPool::shutdown() {
     if (!shutdown_.compare_exchange_strong(expected, true)) return;
     std::lock_guard<std::mutex> lock(mutex_);
     for (cudaEvent_t event : pool_) {
-        cudaEventDestroy(event);
+        (void)cudaEventDestroy(event);
     }
     pool_.clear();
 }

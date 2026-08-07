@@ -7,9 +7,13 @@
 #           as an error; enable relaxed-constexpr and extended-lambda so that
 #           the ParallelFor CUDA path can capture host-device lambdas.
 #
-# The flags are exposed through an INTERFACE helper target `zt::warnings` so
-# that each ztensor target (and downstream consumers) inherits them via a
-# single `target_link_libraries(... PUBLIC zt::warnings)`.
+# The flags are exposed through an INTERFACE helper target `zt::warnings`,
+# attached per-target via zt_target_set_warnings with a $<BUILD_INTERFACE:...>
+# link. They are a build-time implementation concern and must NOT leak into
+# the exported interface: install(EXPORT) would fail (zt::warnings is not in
+# the export set) and shipped consumers would inherit -Wall -Wextra -Werror.
+# In-tree consumers (tests/examples/python) call the helper on their own
+# targets.
 #
 # Options (set on the command line / cache):
 #   ZT_WARNINGS_AS_ERRORS  (default ON)
@@ -102,5 +106,11 @@ endif()
 
 # Convenience function: attach the warning interface to a target.
 function(zt_target_set_warnings target)
-    target_link_libraries(${target} PUBLIC zt::warnings)
+    # PUBLIC $<BUILD_INTERFACE:...>: applies the flags in the build tree only;
+    # install(EXPORT) strips the BUILD_INTERFACE part, so the packaged library
+    # never references (or exports) zt::warnings. Do NOT use plain PUBLIC
+    # (would export -Wall -Wextra -Werror to consumers) or plain PRIVATE (CMake
+    # auto-wraps a STATIC library's PRIVATE deps as $<LINK_ONLY:...>, which
+    # install(EXPORT) refuses because the helper is not in the export set).
+    target_link_libraries(${target} PUBLIC $<BUILD_INTERFACE:zt::warnings>)
 endfunction()

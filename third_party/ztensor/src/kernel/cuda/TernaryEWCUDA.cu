@@ -3,9 +3,8 @@
 // CUDA TernaryEW kernel.  Mirrors TernaryEWCPU.cpp: cond is Bool,
 // a/b share dtype (promoted by caller), |cond| via a separate cast.
 
-#include <cuda_runtime.h>
-
 #include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Vendor.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/Dispatch.h"

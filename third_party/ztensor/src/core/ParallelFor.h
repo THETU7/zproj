@@ -8,8 +8,8 @@
 //
 // CPU path: an OpenMP `parallel for` over [0, n). The CUDA grid-stride kernel
 // (ElementWiseKernel_ / ParallelForCUDA_) is added in phase 4 behind
-// #ifdef __CUDACC__; the same template API is used by both backends, so kernels
-// are written once.
+// #if defined(__CUDACC__) || defined(__HIPCC__); the same template API is used
+// by both backends, so kernels are written once.
 //
 // `func` takes an int64_t workload index and returns void. Capture only what
 // each workload needs (by value where a kernel may run on both host and
@@ -22,7 +22,7 @@
 #include "ztensor/zt/Device.h"
 #include "ztensor/zt/utility/Log.h"
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #include "ztensor/zt/cuda/Exception.h"
 #include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/cuda/Stream.h"
@@ -39,7 +39,7 @@ int EstimateMaxThreads();
 // reduction engine uses this to avoid nested parallelism.
 bool InParallel();
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 // ── CUDA path (visible only to .cu TUs) ─────────────────────────────────────
 // Grid-stride kernel: each thread handles `THREAD` work items strided by the
 // block size. `block * thread` items per CTA. Mirrors Open3D's
@@ -84,7 +84,7 @@ void ParallelForCUDA_(const Device& device, int64_t n, const func_t& func) {
 // Run func(i) for i in [0, n) on `device`. No-op for n <= 0.
 template<typename func_t>
 void ParallelFor(const Device& device, int64_t n, const func_t& func) {
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     ParallelForCUDA_(device, n, func);
 #else
     if (!device.is_cpu()) {

@@ -13,9 +13,8 @@
 // the single-precision overload. Routing `double` through `::sqrtf` would
 // silently drop ~9 significant digits.
 
-#include <cuda_runtime.h>
-
 #include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Vendor.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/Dispatch.h"

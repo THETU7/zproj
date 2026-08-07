@@ -88,8 +88,8 @@ void CudaMemoryPool::configure() {
         // pool-resident while letting the driver reclaim beyond peak spikes.
         // UINT64_MAX hoards indefinitely and causes pool overhead inflation.
         uint64_t threshold = static_cast<uint64_t>(64) << 20;
-        cudaMemPoolSetAttribute(
-            pool, cudaMemPoolAttrReleaseThreshold, &threshold);
+        ZT_CUDA_CHECK_SOFT(cudaMemPoolSetAttribute(
+            pool, cudaMemPoolAttrReleaseThreshold, &threshold));
 
         ZT_LOG_INFO(
             "CudaMemoryPool: driver pool configured (device {}, "
@@ -234,11 +234,11 @@ void CudaMemoryPool::deallocate(void* ptr, size_t bytes, cudaStream_t stream) {
 
     // Pointer was not tracked — free it asynchronously as a safety measure.
 #if CUDART_VERSION >= 11020
-    cudaFreeAsync(ptr, stream);
+    ZT_CUDA_CHECK_SOFT(cudaFreeAsync(ptr, stream));
 #else
     (void)bytes;
     (void)stream;
-    cudaFree(ptr);
+    ZT_CUDA_CHECK_SOFT(cudaFree(ptr));
 #endif
 }
 
@@ -260,10 +260,10 @@ void CudaMemoryPool::deallocate(void* ptr, cudaStream_t stream) {
 
     // Untracked pointer — best-effort async free.
 #if CUDART_VERSION >= 11020
-    cudaFreeAsync(ptr, stream);
+    ZT_CUDA_CHECK_SOFT(cudaFreeAsync(ptr, stream));
 #else
     (void)stream;
-    cudaFree(ptr);
+    ZT_CUDA_CHECK_SOFT(cudaFree(ptr));
 #endif
 }
 
@@ -307,7 +307,7 @@ void CudaMemoryPool::rehome_stream(void* ptr, cudaStream_t stream) {
 void CudaMemoryPool::release_stream(cudaStream_t stream) {
     if (!stream) return;
 
-    cudaStreamSynchronize(stream);
+    ZT_CUDA_CHECK_SOFT(cudaStreamSynchronize(stream));
 
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -336,14 +336,14 @@ void CudaMemoryPool::trim() {
     if (cudaGetDevice(&device) != cudaSuccess) return;
     cudaMemPool_t pool;
     if (cudaDeviceGetDefaultMemPool(&pool, device) != cudaSuccess) return;
-    cudaMemPoolTrimTo(pool, 0);
+    (void)cudaMemPoolTrimTo(pool, 0);
 #endif
 }
 
 void CudaMemoryPool::trim_cached_memory() {
     if (suspend_deallocations_.load(std::memory_order_acquire)) return;
 
-    cudaDeviceSynchronize();
+    ZT_CUDA_CHECK_SOFT(cudaDeviceSynchronize());
     DeferredFreeQueue::instance().flush();
 
     {
@@ -362,7 +362,7 @@ void CudaMemoryPool::trim_cached_memory() {
     if (cudaGetDevice(&device) != cudaSuccess) return;
     cudaMemPool_t pool;
     if (cudaDeviceGetDefaultMemPool(&pool, device) != cudaSuccess) return;
-    cudaMemPoolTrimTo(pool, 0);
+    (void)cudaMemPoolTrimTo(pool, 0);
 #endif
 }
 
@@ -389,8 +389,9 @@ std::string CudaMemoryPool::get_stats_string() const {
         cudaMemPool_t pool;
         if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess) {
             uint64_t used = 0, reserved = 0;
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used);
-            cudaMemPoolGetAttribute(
+            (void)cudaMemPoolGetAttribute(
+                pool, cudaMemPoolAttrUsedMemCurrent, &used);
+            (void)cudaMemPoolGetAttribute(
                 pool, cudaMemPoolAttrReservedMemCurrent, &reserved);
             oss << "  CUDA pool: " << (used / 1024.0 / 1024.0) << " / "
                 << (reserved / 1024.0 / 1024.0) << " MiB used/reserved\n";
@@ -443,7 +444,7 @@ void CudaMemoryPool::free_routed(void* ptr, const AllocationInfo& info) {
                 ptr, info.size, info.home_stream);
             return;
         case AllocMethod::Direct:
-            cudaFree(ptr);
+            ZT_CUDA_CHECK_SOFT(cudaFree(ptr));
             direct_alloc_count_.fetch_sub(1, std::memory_order_release);
             return;
         case AllocMethod::Async:
@@ -451,9 +452,9 @@ void CudaMemoryPool::free_routed(void* ptr, const AllocationInfo& info) {
     }
 
 #if CUDART_VERSION >= 11020
-    cudaFreeAsync(ptr, info.home_stream);
+    ZT_CUDA_CHECK_SOFT(cudaFreeAsync(ptr, info.home_stream));
 #else
-    cudaFree(ptr);
+    ZT_CUDA_CHECK_SOFT(cudaFree(ptr));
 #endif
 }
 
@@ -467,14 +468,14 @@ void* CudaMemoryPool::allocate_direct(size_t bytes) {
             "trimming and retrying...",
             bytes,
             cudaGetErrorString(err));
-        cudaDeviceSynchronize();
+        ZT_CUDA_CHECK_SOFT(cudaDeviceSynchronize());
         SizeBucketedPool::instance().trim_cache();
 #if CUDART_VERSION >= 11020
         int device = 0;
         if (cudaGetDevice(&device) == cudaSuccess) {
             cudaMemPool_t pool;
             if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess) {
-                cudaMemPoolTrimTo(pool, 0);
+                (void)cudaMemPoolTrimTo(pool, 0);
             }
         }
 #endif
@@ -485,7 +486,7 @@ void* CudaMemoryPool::allocate_direct(size_t bytes) {
                 "failed ({})",
                 bytes,
                 cudaGetErrorString(err));
-            cudaGetLastError();  // clear sticky error
+            (void)cudaGetLastError();  // clear sticky error
             return nullptr;
         }
     }

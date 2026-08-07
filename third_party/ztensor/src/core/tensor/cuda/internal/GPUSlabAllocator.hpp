@@ -25,8 +25,6 @@
 
 #ifdef BUILD_CUDA_MODULE
 
-#include <cuda_runtime.h>
-
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -35,6 +33,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ztensor/zt/cuda/Vendor.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/cuda/CUDAEventPool.h"  // bridgeStreams
@@ -301,7 +300,7 @@ private:
     void cleanup() {
         std::lock_guard<std::mutex> lock(slabs_mutex_);
         for (const auto& slab : slabs_) {
-            cudaFree(slab.base);
+            (void)cudaFree(slab.base);
         }
         slabs_.clear();
         stats_.total_slab_memory = 0;

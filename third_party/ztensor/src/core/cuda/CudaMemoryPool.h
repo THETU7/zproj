@@ -23,8 +23,6 @@
 
 #ifdef BUILD_CUDA_MODULE
 
-#include <cuda_runtime.h>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +30,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "ztensor/zt/cuda/Vendor.h"
 
 namespace zt {
 

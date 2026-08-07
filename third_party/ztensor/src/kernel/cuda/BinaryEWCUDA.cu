@@ -8,9 +8,8 @@
 // The per-element math runs in a __device__ lambda over an Indexer +
 // ParallelFor (grid-stride).
 
-#include <cuda_runtime.h>
-
 #include "ztensor/zt/cuda/Guard.h"
+#include "ztensor/zt/cuda/Vendor.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "core/Dispatch.h"

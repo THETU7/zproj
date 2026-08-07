@@ -221,63 +221,63 @@ template<typename T>
 UnaryFn<T> select_unary_fn(UnaryEWOpCode op) {
     switch (op) {
         case UnaryEWOpCode::Neg:
-            return +fn_neg<T>;
+            return fn_neg<T>;
         case UnaryEWOpCode::Abs:
-            return +fn_abs<T>;
+            return fn_abs<T>;
         case UnaryEWOpCode::Sqrt:
-            return +fn_sqrt<T>;
+            return fn_sqrt<T>;
         case UnaryEWOpCode::Rsqrt:
-            return +fn_rsqrt<T>;
+            return fn_rsqrt<T>;
         case UnaryEWOpCode::Exp:
-            return +fn_exp<T>;
+            return fn_exp<T>;
         case UnaryEWOpCode::Expm1:
-            return +fn_expm1<T>;
+            return fn_expm1<T>;
         case UnaryEWOpCode::Log:
-            return +fn_log<T>;
+            return fn_log<T>;
         case UnaryEWOpCode::Log2:
-            return +fn_log2<T>;
+            return fn_log2<T>;
         case UnaryEWOpCode::Log10:
-            return +fn_log10<T>;
+            return fn_log10<T>;
         case UnaryEWOpCode::Log1p:
-            return +fn_log1p<T>;
+            return fn_log1p<T>;
         case UnaryEWOpCode::Reciprocal:
-            return +fn_reciprocal<T>;
+            return fn_reciprocal<T>;
         case UnaryEWOpCode::Sigmoid:
-            return +fn_sigmoid<T>;
+            return fn_sigmoid<T>;
         case UnaryEWOpCode::Frac:
-            return +fn_frac<T>;
+            return fn_frac<T>;
         case UnaryEWOpCode::Sin:
-            return +fn_sin<T>;
+            return fn_sin<T>;
         case UnaryEWOpCode::Cos:
-            return +fn_cos<T>;
+            return fn_cos<T>;
         case UnaryEWOpCode::Tan:
-            return +fn_tan<T>;
+            return fn_tan<T>;
         case UnaryEWOpCode::Asin:
-            return +fn_asin<T>;
+            return fn_asin<T>;
         case UnaryEWOpCode::Acos:
-            return +fn_acos<T>;
+            return fn_acos<T>;
         case UnaryEWOpCode::Atan:
-            return +fn_atan<T>;
+            return fn_atan<T>;
         case UnaryEWOpCode::Sinh:
-            return +fn_sinh<T>;
+            return fn_sinh<T>;
         case UnaryEWOpCode::Cosh:
-            return +fn_cosh<T>;
+            return fn_cosh<T>;
         case UnaryEWOpCode::Tanh:
-            return +fn_tanh<T>;
+            return fn_tanh<T>;
         case UnaryEWOpCode::Floor:
-            return +fn_floor_<T>;
+            return fn_floor_<T>;
         case UnaryEWOpCode::Ceil:
-            return +fn_ceil<T>;
+            return fn_ceil<T>;
         case UnaryEWOpCode::Round:
-            return +fn_round_<T>;
+            return fn_round_<T>;
         case UnaryEWOpCode::Trunc:
-            return +fn_trunc<T>;
+            return fn_trunc<T>;
         case UnaryEWOpCode::Sign:
-            return +fn_sign<T>;
+            return fn_sign<T>;
         case UnaryEWOpCode::LogicalNot:
-            return +fn_logical_not<T>;
+            return fn_logical_not<T>;
         case UnaryEWOpCode::BitwiseNot:
-            return +fn_bitwise_not<T>;
+            return fn_bitwise_not<T>;
     }
     ZT_LOG_ERROR("UnaryEWCPU: unsupported op code {}", static_cast<int>(op));
 }

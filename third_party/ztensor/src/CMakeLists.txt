@@ -75,11 +75,20 @@ set(_zt_sources
 add_library(ztensor ${_zt_sources})
 add_library(zt::ztensor ALIAS ztensor)
 
-# CUDA backend sources (only compiled when BUILD_CUDA_MODULE is on).
-# Runtime-only .cpp files are compiled by the host compiler and include
-# <cuda_runtime.h> through BUILD_CUDA_MODULE-gated headers. Kernel .cu
-# files are compiled by NVCC and contain __global__ / <<<>>> syntax.
-if(BUILD_CUDA_MODULE)
+# GPU backend sources (compiled when either GPU backend is on).
+#
+# The HIP backend reuses the CUDA source tree verbatim (see the top-level
+# CMakeLists.txt): the same runtime .cpp and kernel .cu files are compiled
+# unchanged. Under CUDA, NVCC compiles the .cu files; under HIP, hip-clang
+# compiles them as the HIP language, and the cuda*/cublas* -> hip*/hipblas*
+# API remap lives entirely in include/ztensor/zt/cuda/Vendor.h.
+#
+# Runtime-only .cpp files are always compiled by the host compiler (they
+# include the vendor header through BUILD_CUDA_MODULE-gated headers). The
+# kernel .cu files are tracked separately so that, under HIP, only they get
+# set_source_files_properties(... LANGUAGE HIP) — the .cpp host files must
+# stay CXX.
+if(BUILD_CUDA_MODULE OR BUILD_HIP_MODULE)
     set(_zt_cuda_sources
         core/cuda/CUDAUtils.cpp
         core/cuda/CUDAStreamContext.cpp
@@ -87,6 +96,8 @@ if(BUILD_CUDA_MODULE)
         core/cuda/CudaMemoryPool.cpp
         core/cuda/MemoryManagerCUDA.cpp
         core/cuda/TensorCUDA.cpp
+    )
+    set(_zt_cuda_kernel_sources
         kernel/cuda/FillCUDA.cu
         kernel/cuda/BinaryEWCUDA.cu
         kernel/cuda/UnaryEWCUDA.cu
@@ -102,7 +113,15 @@ if(BUILD_CUDA_MODULE)
         kernel/cuda/MatMulCUDA.cu
         kernel/cuda/RandCUDA.cu
     )
-    target_sources(ztensor PRIVATE ${_zt_cuda_sources})
+    target_sources(ztensor PRIVATE ${_zt_cuda_sources} ${_zt_cuda_kernel_sources})
+
+    # Compile the kernel .cu files as HIP (hip-clang) instead of CUDA (NVCC).
+    # Triple-chevron <<<>>> launches and __global__ are natively supported by
+    # hip-clang, so no source changes are needed for the launch syntax.
+    if(BUILD_HIP_MODULE)
+        set_source_files_properties(${_zt_cuda_kernel_sources}
+            PROPERTIES LANGUAGE HIP)
+    endif()
 endif()
 
 target_include_directories(ztensor
@@ -123,11 +142,16 @@ endif()
 # spdlog: consumers of public Log.h also need it -> PUBLIC.
 target_link_libraries(ztensor PUBLIC spdlog::spdlog)
 
-# Eigen (header-only CPU matmul) and cuBLAS (CUDA matmul). Eigen links in
-# every build; cuBLAS only when the CUDA backend is on.
+# Eigen (header-only CPU matmul) and the GPU BLAS (CUDA/HIP matmul). Eigen
+# links in every build; the BLAS only when a GPU backend is on. cuBLAS backs
+# the CUDA MatMul; hipBLAS + rocBLAS back the HIP MatMul (hipBLAS dispatches
+# to rocBLAS for the GEMM). hip::host provides the host-side HIP runtime
+# symbols (hipMalloc etc.) used by the runtime .cpp files via the vendor shim.
 target_link_libraries(ztensor PRIVATE Eigen3::Eigen)
 if(BUILD_CUDA_MODULE)
     target_link_libraries(ztensor PRIVATE CUDA::cublas)
+elseif(BUILD_HIP_MODULE)
+    target_link_libraries(ztensor PRIVATE hip::host roc::rocblas roc::hipblas)
 endif()
 
 # OpenMP backs the CPU ParallelFor. ParallelFor degrades to serial when it is
@@ -135,13 +159,31 @@ endif()
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(ztensor PRIVATE OpenMP::OpenMP_CXX)
+    # The .a leaves OpenMP symbols unresolved -> consumers must link it too.
+    # For STATIC libs CMake auto-propagates PRIVATE deps as $<LINK_ONLY:...> into
+    # the exported interface; spelling it out explicitly keeps the requirement
+    # correct even if the library ever becomes SHARED (where PRIVATE deps are
+    # not propagated at all). $<LINK_ONLY:> avoids dragging OpenMP's includes
+    # onto consumers (no public header includes OpenMP). CMake >= 3.13; project
+    # min is 3.18. Keeping this makes enabling OpenMP in the release tarball a
+    # one-flag flip (Packaging.cmake records ZT_CONFIG_HAS_OPENMP for the
+    # installed config).
+    target_link_libraries(ztensor INTERFACE $<LINK_ONLY:OpenMP::OpenMP_CXX>)
 endif()
 
 target_compile_features(ztensor PUBLIC cxx_std_17)
 
-# Propagate BUILD_CUDA_MODULE so headers can #ifdef on it.
+# Propagate the active GPU backend so headers/dispatch can #ifdef on it.
+#
+# Both backends define BUILD_CUDA_MODULE: the existing #ifdef BUILD_CUDA_MODULE
+# dispatch shims, MemoryManager, and public headers then compile unchanged for
+# HIP (the cuda*/cublas* -> hip*/hipblas* remap is selected by BUILD_HIP_MODULE
+# inside Vendor.h). BUILD_HIP_MODULE additionally selects the HIP vendor path.
+# This mirrors ggml re-exporting GGML_USE_CUDA for its HIP backend.
 target_compile_definitions(ztensor PUBLIC
-    $<$<BOOL:${BUILD_CUDA_MODULE}>:BUILD_CUDA_MODULE>)
+    $<$<BOOL:${BUILD_CUDA_MODULE}>:BUILD_CUDA_MODULE>
+    $<$<BOOL:${BUILD_HIP_MODULE}>:BUILD_CUDA_MODULE>
+    $<$<BOOL:${BUILD_HIP_MODULE}>:BUILD_HIP_MODULE>)
 
 # Version info as compile definitions (usable from Log / build info).
 target_compile_definitions(ztensor PUBLIC
@@ -149,6 +191,17 @@ target_compile_definitions(ztensor PUBLIC
 
 # Strict warnings.
 zt_target_set_warnings(ztensor)
+
+# HIP fast-math. hip-clang (the HIP language compiler) is a clang front-end,
+# so it takes the same -funsafe-math-optimizations as host clang. We use the
+# targeted flag rather than -ffast-math: -ffast-math also enables
+# -ffinite-math-only, which assumes no NaN/Inf and breaks ReductionCUDA's
+# is_nan checks (and the fp16/bf16 NaN round-trips in Half/BFloat16).
+# Scoped to the HIP language so it never touches host CXX compilation.
+if(BUILD_HIP_MODULE)
+    target_compile_options(ztensor PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-funsafe-math-optimizations>)
+endif()
 
 # Group the public headers in IDEs.
 source_group(TREE ${PROJECT_SOURCE_DIR}/include FILES ${_zt_public_headers})

@@ -11,7 +11,7 @@
 
 #ifdef BUILD_CUDA_MODULE
 
-#include <cuda_runtime.h>
+#include "ztensor/zt/cuda/Vendor.h"
 
 namespace zt {
 

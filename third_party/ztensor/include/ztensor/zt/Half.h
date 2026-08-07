@@ -26,8 +26,10 @@
 
 #include "ztensor/zt/Macros.h"
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__)
 #include <cuda_fp16.h>
+#elif defined(__HIPCC__)
+#include <hip/hip_fp16.h>
 #endif
 
 namespace zt {
@@ -65,12 +67,14 @@ struct alignas(2) Half {
     ZT_HOST_DEVICE operator float() const;
 
     // ---- CUDA __half interop ------------------------------------------------
-#ifdef __CUDACC__
-    /// Implicit: construct from CUDA __half (binary-compatible, no conversion).
+    // __half is the native half type under both CUDA and HIP (same name), so
+    // the interop is identical for both device compilers.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    /// Implicit: construct from CUDA/HIP __half (binary-compatible, no conv).
     ZT_HOST_DEVICE Half(__half v)
         : x_(*reinterpret_cast<const uint16_t*>(&v)) {}
 
-    /// Explicit: reinterpret as CUDA __half (binary-compatible).
+    /// Explicit: reinterpret as CUDA/HIP __half (binary-compatible).
     explicit ZT_HOST_DEVICE operator __half() const {
         return *reinterpret_cast<const __half*>(&x_);
     }

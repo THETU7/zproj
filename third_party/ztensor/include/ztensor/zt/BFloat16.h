@@ -23,8 +23,13 @@
 
 #include "ztensor/zt/Macros.h"
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__)
 #include <cuda_bf16.h>
+#elif defined(__HIPCC__)
+#include <hip/hip_bf16.h>
+// HIP exposes bf16 as __hip_bfloat16; alias it to the CUDA typename so the
+// __nv_bfloat16 interop below compiles unchanged under HIP.
+using __nv_bfloat16 = __hip_bfloat16;
 #endif
 
 namespace zt {
@@ -62,7 +67,9 @@ struct alignas(2) BFloat16 {
     ZT_HOST_DEVICE operator float() const;
 
     // ---- CUDA __nv_bfloat16 interop -----------------------------------------
-#ifdef __CUDACC__
+    // Under HIP __nv_bfloat16 is aliased to __hip_bfloat16 (see the include
+    // block above), so this interop is source-identical for both compilers.
+#if defined(__CUDACC__) || defined(__HIPCC__)
     /// Implicit: construct from CUDA __nv_bfloat16 (binary-compatible).
     ZT_HOST_DEVICE BFloat16(__nv_bfloat16 v)
         : x_(*reinterpret_cast<const uint16_t*>(&v)) {}

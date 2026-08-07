@@ -4,6 +4,7 @@
 // via OpenMP; the scan axis is walked serially per row.
 
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "ztensor/zt/utility/Log.h"
@@ -19,7 +20,17 @@ T scan_combine(ScanOpCode op, T acc, T v) {
         case ScanOpCode::CumSum:
             return static_cast<T>(acc + v);
         case ScanOpCode::CumProd:
-            return static_cast<T>(acc * v);
+            // For bool, product == logical AND. g++-11's -Wint-in-bool-context
+            // flags `acc * v` for the bool instantiation, so the bool path is
+            // diverted via `if constexpr`. The non-bool multiply MUST live in
+            // the `else` branch: g++-11 otherwise still analyzes the statement
+            // (it follows the `if`, so it is not a discarded branch) and emits
+            // the warning anyway.
+            if constexpr (std::is_same_v<T, bool>) {
+                return acc && v;
+            } else {
+                return static_cast<T>(acc * v);
+            }
         case ScanOpCode::CumMax:
             return v > acc ? v : acc;
         case ScanOpCode::CumMin:

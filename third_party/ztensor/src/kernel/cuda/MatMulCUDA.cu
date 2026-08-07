@@ -20,22 +20,45 @@
 // * Integer matmul rejected with ZT_LOG_ERROR (DESIGN out of scope).
 //
 // Two batch counts are exercised by the dispatcher:
-//   * MatMulCUDA: 2D GEMM (batch=1 via cublasGemmEx_64) or true 3D batched
-//     (via cublasGemmStridedBatchedEx_64).
+//   * MatMulCUDA: 2D GEMM (batch=1 via ZT_CUBLAS_GEMM_EX) or true 3D batched
+//     (via ZT_CUBLAS_GEMM_STRIDED_BATCHED_EX) — both alias the 64-bit-index
+//     cuBLAS API on CUDA >= 12 and the classic int API on older toolkits
+//     (see the version guard below the includes).
 //   * AddMMCUDA:  2D GEMM only, with beta applied to C and alpha to A@B.
-
-#include <cublas_v2.h>
-#include <cuda_runtime.h>
 
 #include <cstdint>
 #include <unordered_map>
 
 #include "ztensor/zt/cuda/Guard.h"
 #include "ztensor/zt/cuda/Stream.h"
+#include "ztensor/zt/cuda/Vendor.h"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/utility/Log.h"
 
 #include "kernel/MatMul.h"
+
+// cuBLAS gained the 64-bit-index (_64) GEMM API in CUDA 12.0. The CUDA 11.8
+// wheel build predates it, so alias the two calls to the classic int API on
+// older toolkits. The _64 and classic signatures are identical apart from the
+// size-parameter type (int64_t vs int); the int64_t args at the call sites
+// narrow to int silently under -Wall -Wextra (matmul dims stay well below
+// int32 max in practice), so the call sites need no per-version casts.
+//
+// hipBLAS ships the same 64-bit-index (_64) GEMM API (hipblasGemmEx_64 /
+// hipblasGemmStridedBatchedEx_64 — the "64-bit interface" in hipblas.h), so
+// the HIP build uses the _64 symbols too, keeping matmul dims int64-indexed
+// and overflow-safe past 2^31 elements, matching CUDA >= 12. (The
+// cuda*/cublas* names are macro-remapped to hip*/hipblas* by Vendor.h.)
+#if defined(__HIPCC__)
+#define ZT_CUBLAS_GEMM_EX hipblasGemmEx_64
+#define ZT_CUBLAS_GEMM_STRIDED_BATCHED_EX hipblasGemmStridedBatchedEx_64
+#elif CUDART_VERSION >= 12000
+#define ZT_CUBLAS_GEMM_EX cublasGemmEx_64
+#define ZT_CUBLAS_GEMM_STRIDED_BATCHED_EX cublasGemmStridedBatchedEx_64
+#else
+#define ZT_CUBLAS_GEMM_EX cublasGemmEx
+#define ZT_CUBLAS_GEMM_STRIDED_BATCHED_EX cublasGemmStridedBatchedEx
+#endif
 
 namespace zt {
 namespace kernel {
@@ -175,25 +198,25 @@ void gemm_2d(const Tensor& A,
     void* C_ptr = const_cast<void*>(C.data_ptr());
     const void* A_ptr = A.data_ptr();
     const void* B_ptr = B.data_ptr();
-    ZT_CUBLAS_CHECK(cublasGemmEx_64(handle,
-                                    CUBLAS_OP_N,
-                                    CUBLAS_OP_N,
-                                    n,
-                                    m,
-                                    k,  // (n, m, k) — swapped order
-                                    a_buf.ptr(),
-                                    B_ptr,
-                                    cuda_dtype(dt),
-                                    n,  // first matrix: B, ldb = n
-                                    A_ptr,
-                                    cuda_dtype(dt),
-                                    k,  // second matrix: A, lda = k
-                                    b_buf.ptr(),
-                                    C_ptr,
-                                    cuda_dtype(dt),
-                                    n,  // C, ldc = n
-                                    compute_type(dt),
-                                    CUBLAS_GEMM_DEFAULT));
+    ZT_CUBLAS_CHECK(ZT_CUBLAS_GEMM_EX(handle,
+                                      CUBLAS_OP_N,
+                                      CUBLAS_OP_N,
+                                      n,
+                                      m,
+                                      k,  // (n, m, k) — swapped order
+                                      a_buf.ptr(),
+                                      B_ptr,
+                                      cuda_dtype(dt),
+                                      n,  // first matrix: B, ldb = n
+                                      A_ptr,
+                                      cuda_dtype(dt),
+                                      k,  // second matrix: A, lda = k
+                                      b_buf.ptr(),
+                                      C_ptr,
+                                      cuda_dtype(dt),
+                                      n,  // C, ldc = n
+                                      compute_type(dt),
+                                      CUBLAS_GEMM_DEFAULT));
 }
 
 // Batched GEMM. A {b,m,k}, B {b,k,n}, C {b,m,n}, all contiguous. Strides are
@@ -219,29 +242,29 @@ void gemm_batched(const Tensor& A,
     const void* A_ptr = A.data_ptr();
     const void* B_ptr = B.data_ptr();
     ZT_CUBLAS_CHECK(
-        cublasGemmStridedBatchedEx_64(handle,
-                                      CUBLAS_OP_N,
-                                      CUBLAS_OP_N,
-                                      n,
-                                      m,
-                                      k,  // (n, m, k) — swapped order
-                                      a_buf.ptr(),
-                                      B_ptr,
-                                      cuda_dtype(dt),
-                                      n,
-                                      stride_b,  // first matrix: B
-                                      A_ptr,
-                                      cuda_dtype(dt),
-                                      k,
-                                      stride_a,  // second matrix: A
-                                      b_buf.ptr(),
-                                      C_ptr,
-                                      cuda_dtype(dt),
-                                      n,
-                                      stride_c,
-                                      static_cast<int64_t>(batch),
-                                      compute_type(dt),
-                                      CUBLAS_GEMM_DEFAULT));
+        ZT_CUBLAS_GEMM_STRIDED_BATCHED_EX(handle,
+                                          CUBLAS_OP_N,
+                                          CUBLAS_OP_N,
+                                          n,
+                                          m,
+                                          k,  // (n, m, k) — swapped order
+                                          a_buf.ptr(),
+                                          B_ptr,
+                                          cuda_dtype(dt),
+                                          n,
+                                          stride_b,  // first matrix: B
+                                          A_ptr,
+                                          cuda_dtype(dt),
+                                          k,
+                                          stride_a,  // second matrix: A
+                                          b_buf.ptr(),
+                                          C_ptr,
+                                          cuda_dtype(dt),
+                                          n,
+                                          stride_c,
+                                          static_cast<int64_t>(batch),
+                                          compute_type(dt),
+                                          CUBLAS_GEMM_DEFAULT));
 }
 
 }  // namespace

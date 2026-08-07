@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+
+# spdlog: PUBLIC on zt::ztensor (Log.h exposes it) -> .a has unresolved spdlog
+# symbols -> consumer must link it. Tarball builds against SYSTEM spdlog
+# (ZT_USE_VENDORED_SPDLOG=OFF). Consumer: apt install libspdlog-dev (>= 1.9).
+find_dependency(spdlog CONFIG)
+
+# Eigen3: PRIVATE on zt::ztensor (header-only, baked in) but PUBLIC on
+# zt::ztensor_eigen (EigenConvert.h). ztensor_eigen is in the export set -> required.
+find_dependency(Eigen3 CONFIG)
+
+# OpenMP: only if the .a was built with it. v1 tarball builds without -> 0 -> skipped.
+if(@ZT_CONFIG_HAS_OPENMP@)
+    find_dependency(OpenMP)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/ztensorTargets.cmake")
+check_required_components(ztensor)

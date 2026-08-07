@@ -19,13 +19,14 @@
 
 #ifdef BUILD_CUDA_MODULE
 
-#include <cuda_runtime.h>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <vector>
+
+#include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK_SOFT
+#include "ztensor/zt/cuda/Vendor.h"
 
 #include "core/cuda/CUDAEventPool.h"
 
@@ -126,7 +127,7 @@ inline void DeferredFreeQueue::defer_free(void* ptr,
     cudaEvent_t event = ::zt::cuda::CudaEventPool::instance().acquire();
     if (!event) {
         // Cannot get an event — synchronise the host and free immediately.
-        cudaStreamSynchronize(stream);
+        ZT_CUDA_CHECK_SOFT(cudaStreamSynchronize(stream));
         callback(ptr, size);
         return;
     }
@@ -134,7 +135,7 @@ inline void DeferredFreeQueue::defer_free(void* ptr,
     cudaError_t err = cudaEventRecord(event, stream);
     if (err != cudaSuccess) {
         ::zt::cuda::CudaEventPool::instance().release(event);
-        cudaStreamSynchronize(stream);
+        ZT_CUDA_CHECK_SOFT(cudaStreamSynchronize(stream));
         callback(ptr, size);
         return;
     }
@@ -194,7 +195,7 @@ inline void DeferredFreeQueue::flush() {
         pending_.clear();
     }
 
-    cudaDeviceSynchronize();
+    ZT_CUDA_CHECK_SOFT(cudaDeviceSynchronize());
 
     for (const auto& item : to_free) {
         ::zt::cuda::CudaEventPool::instance().release(item.event);

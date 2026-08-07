@@ -49,7 +49,19 @@ public:
 
     // Copy / move are shallow (share Blob); they must be defaulted explicitly
     // because we declare user-provided copy-assignment operators below.
-    Tensor(const Tensor&) noexcept = default;
+    //
+    // The copy ctor intentionally has no noexcept: its implicit
+    // exception-specification is potentially-throwing, because ShapeVector
+    // (SmallVector) copy heap-allocates (see SmallVector::assign -> grow ->
+    // operator new). Annotating a defaulted special member STRONGER than its
+    // implicit spec is legal C++17, but gcc <= 8 (the manylinux_2_28 baseline)
+    // has a bug that DELETES the ctor on the mismatch, breaking the wheel
+    // build. Omitting it lets every compiler deduce noexcept(false), which is
+    // also safer: a throwing SmallVector copy now propagates instead of calling
+    // std::terminate through a violated noexcept. Move/assignment stay noexcept
+    // — SmallVector's move members are marked noexcept, so their implicit spec
+    // already matches.
+    Tensor(const Tensor&) = default;
     Tensor(Tensor&&) noexcept = default;
     Tensor& operator=(Tensor&&) & noexcept = default;
 

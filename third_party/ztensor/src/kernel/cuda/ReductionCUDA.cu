@@ -213,11 +213,18 @@ __host__ __device__ inline bool is_nan<double>(double v) {
 #ifdef __CUDACC__
 template<>
 __host__ __device__ inline bool is_nan<__half>(__half v) {
-    return __hisnan(v);
+    // __hisnan is __device__-only on CUDA 11.8, so a __host__ __device__
+    // caller can't use it. Widen to float and use the standard isnan (which
+    // is __host__ __device__); a half is NaN iff its float widening is.
+    // Portable across CUDA 11.8 .. 13.x.
+    return isnan(__half2float(v));
 }
 template<>
 __host__ __device__ inline bool is_nan<__nv_bfloat16>(__nv_bfloat16 v) {
-    return __hisnan(v);
+    // __hisnan is half-only, and CUDA < 12 provides no __nv_bfloat16 ->
+    // __half conversion; check NaN via the float widening instead (a bf16 is
+    // NaN iff its float expansion is). Portable across CUDA 11.8 .. 13.x.
+    return isnan(__bfloat162float(v));
 }
 #endif  // __CUDACC__
 

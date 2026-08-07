@@ -28,8 +28,6 @@
 
 #ifdef BUILD_CUDA_MODULE
 
-#include <cuda_runtime.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -38,6 +36,9 @@
 #include <limits>
 #include <mutex>
 #include <vector>
+
+#include "ztensor/zt/cuda/Exception.h"  // ZT_CUDA_CHECK_SOFT
+#include "ztensor/zt/cuda/Vendor.h"
 
 #include "core/cuda/CUDAEventPool.h"  // bridgeStreams
 
@@ -203,7 +204,7 @@ public:
                                             bucket.hits == 0 &&
                                             bucket.misses < 2;
             if (large_probationary) {
-                cudaFreeAsync(ptr, stream);
+                ZT_CUDA_CHECK_SOFT(cudaFreeAsync(ptr, stream));
                 return true;  // freed, not cached
             }
 
@@ -216,7 +217,7 @@ public:
                 bucket.cached_bytes -= bucket_size;
                 stats_.bytes_cached.fetch_sub(bucket_size,
                                               std::memory_order_relaxed);
-                cudaFreeAsync(old.ptr, old.stream);
+                ZT_CUDA_CHECK_SOFT(cudaFreeAsync(old.ptr, old.stream));
             }
 
             bucket.cache.push_back({ptr, stream});
@@ -241,7 +242,7 @@ public:
             trim_cache();
             err = cudaMallocAsync(&ptr, bucket_size, stream);
             if (err != cudaSuccess) {
-                cudaGetLastError();  // clear sticky error
+                (void)cudaGetLastError();  // clear sticky error
                 return nullptr;
             }
         }
@@ -256,7 +257,7 @@ public:
     void deallocate(void* ptr, size_t bytes, cudaStream_t stream = nullptr) {
         if (!ptr) return;
         if (!cache_free(ptr, bytes, stream)) {
-            cudaFreeAsync(ptr, stream);
+            ZT_CUDA_CHECK_SOFT(cudaFreeAsync(ptr, stream));
         }
     }
 
@@ -296,7 +297,7 @@ public:
         for (size_t i = 0; i < NUM_BUCKETS; ++i) {
             std::lock_guard<std::mutex> lock(buckets_[i].mutex);
             for (const CachedBlock& block : buckets_[i].cache) {
-                cudaFreeAsync(block.ptr, block.stream);
+                ZT_CUDA_CHECK_SOFT(cudaFreeAsync(block.ptr, block.stream));
             }
             buckets_[i].cache.clear();
             buckets_[i].cached_bytes = 0;
@@ -414,7 +415,7 @@ private:
                 stats_.bytes_cached.fetch_sub(victim_size,
                                               std::memory_order_relaxed);
             }
-            cudaFreeAsync(victim.ptr, victim.stream);
+            ZT_CUDA_CHECK_SOFT(cudaFreeAsync(victim.ptr, victim.stream));
         }
     }
 
