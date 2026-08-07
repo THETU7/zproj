@@ -8,17 +8,12 @@
   "configurePresets": [
     {
       "name": "default",
-      "displayName": "g++-15 / nvcc host, native GPU arch, Release",
-      "description": "Uses g++-15 as both the host C++ compiler and the nvcc host compiler, and lets CMake auto-detect the local GPU compute capability.",
+      "displayName": "Ninja, Release, machine-independent defaults",
+      "description": "Machine-independent defaults: host/CUDA compilers and GPU architecture are auto-detected. Machine-specific overrides (compiler versions, CUDA arch, ...) belong in the gitignored CMakeUserPresets.json.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": "gcc-15",
-        "CMAKE_CXX_COMPILER": "g++-15",
-        "CMAKE_CUDA_COMPILER": "nvcc",
-        "CMAKE_CUDA_HOST_COMPILER": "g++-15",
-        "CMAKE_CUDA_ARCHITECTURES": "native",
         "CMAKE_CUDA_FLAGS": "--expt-relaxed-constexpr",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
@@ -26,6 +21,7 @@
     {
       "name": "debug",
       "inherits": "default",
+      "displayName": "Ninja, Debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }

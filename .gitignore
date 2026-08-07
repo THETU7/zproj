@@ -370,3 +370,6 @@ MigrationBackup/
 ### zproj ###
 .cache/
 compile_commands.json
+
+# CMake user presets (machine-specific, never committed)
+CMakeUserPresets.json
