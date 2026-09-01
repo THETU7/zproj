@@ -25,9 +25,23 @@ void CheckPointTensor(const zt::Tensor& t, int64_t width, const char* name) {
 
 // The analytic inverse (threshold 1e-9 px, 20 iterations) is forced inside
 // rpc_ray, so RpcStereo holds RpcModels only to carry each image's RpcInfo and
-// precomputed affine seed (RpcInverseInit) -- their options_ are unused.
-RpcStereo::RpcStereo(RpcInfo left, RpcInfo right, double h_low, double h_high)
-    : left_(left), right_(right), h_low_(h_low), h_high_(h_high) {}
+// precomputed affine seed (RpcInverseInit) -- their options_ are unused. The
+// float-path precomputations are built alongside for StereoPrecision::FloatEnu.
+RpcStereo::RpcStereo(RpcInfo left,
+                     RpcInfo right,
+                     double h_low,
+                     double h_high,
+                     StereoPrecision precision)
+    : left_(left),
+      right_(right),
+      h_low_(h_low),
+      h_high_(h_high),
+      precision_(precision),
+      left_float_(MakeRpcInfoFloat(left)),
+      right_float_(MakeRpcInfoFloat(right)),
+      left_init_float_(MakeRpcInverseInitFloat(left, left_.inverse_init())),
+      right_init_float_(MakeRpcInverseInitFloat(right, right_.inverse_init())),
+      enu_frame_(MakeEnuFrame(left, right)) {}
 
 void RpcStereo::triangulate(const zt::Tensor& left_colrow,
                             const zt::Tensor& right_colrow,
@@ -59,32 +73,56 @@ void RpcStereo::triangulate(const zt::Tensor& left_colrow,
 
     if (left_colrow.is_cpu() && right_colrow.is_cpu() && lonlath.is_cpu() &&
         rms.is_cpu()) {
-        triangulation_cpu(left_.info(),
-                          left_.inverse_init(),
-                          right_.info(),
-                          right_.inverse_init(),
-                          h_low_,
-                          h_high_,
-                          left_colrow,
-                          right_colrow,
-                          lonlath,
-                          rms);
+        if (precision_ == StereoPrecision::FloatEnu) {
+            const StereoFloatParams params{left_float_,
+                                           right_float_,
+                                           left_init_float_,
+                                           right_init_float_,
+                                           enu_frame_,
+                                           h_low_,
+                                           h_high_};
+            triangulation_cpu_float(
+                params, left_colrow, right_colrow, lonlath, rms);
+        } else {
+            triangulation_cpu(left_.info(),
+                              left_.inverse_init(),
+                              right_.info(),
+                              right_.inverse_init(),
+                              h_low_,
+                              h_high_,
+                              left_colrow,
+                              right_colrow,
+                              lonlath,
+                              rms);
+        }
         return;
     }
 
 #ifdef BUILD_CUDA_MODULE
     if (left_colrow.is_cuda() && right_colrow.is_cuda() && lonlath.is_cuda() &&
         rms.is_cuda()) {
-        triangulation_cuda(left_.info(),
-                           left_.inverse_init(),
-                           right_.info(),
-                           right_.inverse_init(),
-                           h_low_,
-                           h_high_,
-                           left_colrow,
-                           right_colrow,
-                           lonlath,
-                           rms);
+        if (precision_ == StereoPrecision::FloatEnu) {
+            const StereoFloatParams params{left_float_,
+                                           right_float_,
+                                           left_init_float_,
+                                           right_init_float_,
+                                           enu_frame_,
+                                           h_low_,
+                                           h_high_};
+            triangulation_cuda_float(
+                params, left_colrow, right_colrow, lonlath, rms);
+        } else {
+            triangulation_cuda(left_.info(),
+                               left_.inverse_init(),
+                               right_.info(),
+                               right_.inverse_init(),
+                               h_low_,
+                               h_high_,
+                               left_colrow,
+                               right_colrow,
+                               lonlath,
+                               rms);
+        }
         return;
     }
 #endif  // BUILD_CUDA_MODULE

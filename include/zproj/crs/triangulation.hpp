@@ -11,14 +11,33 @@
 #pragma once
 
 #include "zproj/crs/rpc.hpp"
+#include "zproj/crs/rpc_ray_float.hpp"
 #include "ztensor/zt/Tensor.h"
 
 namespace zproj::crs {
 
+// Precision of the per-point triangulation math. Inputs and outputs are
+// double tensors either way; this selects the internal ray pipeline.
+enum class StereoPrecision {
+    // All-double reference path (rpc_ray.hpp): machine-precision rays,
+    // FP64-throughput-bound on consumer GeForce parts (FP64 = 1/64 FP32).
+    Double,
+    // Float Newton inverse + scene-local ENU float rays/intersection
+    // (rpc_ray_float.hpp): ~4x faster on consumer GeForce, millimetre-level
+    // on scene-sized footprints (scales with footprint/GSD; continental
+    // scenes degrade toward metres). Geodetic<->cartesian stays double.
+    // SLOWER than Double on CPU -- a GPU path.
+    FloatEnu,
+};
+
 // Two-view RPC stereo triangulation. Internally forces the analytic inverse.
 class RpcStereo {
 public:
-    RpcStereo(RpcInfo left, RpcInfo right, double h_low, double h_high);
+    RpcStereo(RpcInfo left,
+              RpcInfo right,
+              double h_low,
+              double h_high,
+              StereoPrecision precision = StereoPrecision::Double);
 
     // left_colrow / right_colrow : [N, 2] double (col, row)
     // lonlath  : [N, 3] (lon deg, lat deg, h m)   -- may be empty, allocated
@@ -32,11 +51,21 @@ public:
                      zt::Tensor& lonlath,
                      zt::Tensor& rms) const;
 
+    StereoPrecision precision() const noexcept { return precision_; }
+
 private:
     RpcModel left_;  // each holds its own RpcInverseInit
     RpcModel right_;
     double h_low_;
     double h_high_;
+    StereoPrecision precision_;
+
+    // Float-path precomputations (built alongside; used only for FloatEnu).
+    RpcInfoFloat left_float_;
+    RpcInfoFloat right_float_;
+    RpcInverseInitFloat left_init_float_;
+    RpcInverseInitFloat right_init_float_;
+    EnuFrame enu_frame_;
 };
 
 }  // namespace zproj::crs

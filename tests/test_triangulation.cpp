@@ -30,6 +30,7 @@
 
 #include "zproj/crs/rpc.hpp"
 #include "zproj/crs/rpc_ray.hpp"
+#include "zproj/crs/rpc_ray_float.hpp"
 #include "zproj/crs/triangulation.hpp"
 #include "zproj/crs/wgs84.hpp"
 #include "ztensor/zt/ScalarType.h"
@@ -49,6 +50,7 @@ using zproj::crs::RpcInverseInit;
 using zproj::crs::RpcModel;
 using zproj::crs::RpcRay;
 using zproj::crs::RpcStereo;
+using zproj::crs::StereoPrecision;
 using zproj::crs::to_ecef;
 using zproj::crs::triangulate_nview;
 using zproj::crs::triangulate_pair;
@@ -77,6 +79,18 @@ constexpr double kTolCudaH = 1e-4;
 // cancel; VW's formula has the same behaviour), so the rms checks are looser.
 constexpr double kTolPointM = 1e-6;
 constexpr double kTolRmsM = 1e-3;
+// Float (ENU) path tolerances, measured on the realistic 5 km footprint:
+// the float Newton floors at ~1e-2 px (float evaluation noise), which lands
+// ~1e-3 deg-scale horizontal error at 1e-8 deg and ~2e-2 m height error --
+// both at or below the double path's chord-approximation error. The
+// tolerances below keep an order-of-magnitude margin.
+constexpr double kTolFloatDeg = 1e-6;
+constexpr double kTolFloatH = 0.1;
+constexpr double kTolFloatRmsM = 0.01;
+// Float CPU vs CUDA: float rounding of the ENU quantities plus the usual
+// transcendental differences; measured ~1e-8 deg.
+constexpr double kTolFloatCudaDeg = 1e-5;
+constexpr double kTolFloatCudaH = 1e-2;
 
 // Ray end-point height span for the closed-loop tests. ASP's
 // RPCModel::point_and_dir clamps the span to min(0.9 * height_scale, 50) m;
@@ -122,6 +136,29 @@ RpcInfo MakeObliqueInfo() {
     // k = 1e-4 in normalized space: ~10 px of col shift across the full
     // +/-height_scale range, and a ~11 deg lean vs the vertical ray.
     info.samp_num_coeff[3] = 1e-4;  // height
+    return info;
+}
+
+// Realistic-footprint variants of the two models above: same 50000 px image,
+// but a 0.05 deg (~5 km) ground window (GSD ~0.1 m) -- the scale of a real
+// satellite scene, and the regime the float ENU path is designed for (its
+// float grid error scales with the footprint). The oblique height coupling
+// is rescaled to keep the same ~11 deg ray convergence.
+RpcInfo MakeNadirInfoRealistic() {
+    RpcInfo info = MakeNadirInfo();
+    info.lat_scale = 0.05;
+    info.long_scale = 0.05;
+    info.min_lon = info.long_off - 0.05;
+    info.max_lon = info.long_off + 0.05;
+    info.min_lat = info.lat_off - 0.05;
+    info.max_lat = info.lat_off + 0.05;
+    return info;
+}
+
+RpcInfo MakeObliqueInfoRealistic() {
+    RpcInfo info = MakeNadirInfoRealistic();
+    // k * height_scale / ground window ~ tan(11 deg) over the height span.
+    info.samp_num_coeff[3] = 0.02;
     return info;
 }
 
@@ -426,6 +463,109 @@ TEST(RpcStereoCpu, ReusesProvidedOutputs) {
     }
 }
 
+// ============================ float (ENU) path ============================
+
+// Closed loop on a realistic 5 km footprint: the float pipeline must recover
+// the ground truth to its documented budget (mm horizontal, cm height).
+TEST(RpcStereoFloatCpu, ClosedLoopRealisticFootprint) {
+    const RpcInfo left_info = MakeNadirInfoRealistic();
+    const RpcInfo right_info = MakeObliqueInfoRealistic();
+    const RpcModel left(left_info);
+    const RpcModel right(right_info);
+
+    const std::vector<Pt> pts = MakePoints(256, left_info);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor left_cr;
+    zt::Tensor right_cr;
+    left.lonlatalt_to_colrow(in, left_cr);
+    right.lonlatalt_to_colrow(in, right_cr);
+
+    const RpcStereo stereo(left_info,
+                           right_info,
+                           left_info.height_off - kRaySpanM,
+                           left_info.height_off + kRaySpanM,
+                           StereoPrecision::FloatEnu);
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    stereo.triangulate(left_cr, right_cr, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(ll[3 * i + 0], pts[i].lon, kTolFloatDeg);
+        EXPECT_NEAR(ll[3 * i + 1], pts[i].lat, kTolFloatDeg);
+        EXPECT_NEAR(ll[3 * i + 2], pts[i].alt, kTolFloatH);
+        EXPECT_LT(rm[i], kTolFloatRmsM) << "rms for a closed-loop point";
+    }
+}
+
+// The float path must stay within its documented error of the double
+// reference on the same points (accuracy regression tripwire).
+TEST(RpcStereoFloatCpu, MatchesDoublePath) {
+    const RpcInfo left_info = MakeNadirInfoRealistic();
+    const RpcInfo right_info = MakeObliqueInfoRealistic();
+    const RpcModel left(left_info);
+    const RpcModel right(right_info);
+
+    const std::vector<Pt> pts = MakePoints(256, left_info);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor left_cr;
+    zt::Tensor right_cr;
+    left.lonlatalt_to_colrow(in, left_cr);
+    right.lonlatalt_to_colrow(in, right_cr);
+
+    const double h_low = left_info.height_off - kRaySpanM;
+    const double h_high = left_info.height_off + kRaySpanM;
+    const RpcStereo stereo_d(left_info, right_info, h_low, h_high);
+    const RpcStereo stereo_f(
+        left_info, right_info, h_low, h_high, StereoPrecision::FloatEnu);
+
+    zt::Tensor ll_d;
+    zt::Tensor rms_d;
+    stereo_d.triangulate(left_cr, right_cr, ll_d, rms_d);
+    zt::Tensor ll_f;
+    zt::Tensor rms_f;
+    stereo_f.triangulate(left_cr, right_cr, ll_f, rms_f);
+
+    const double* a = ll_d.data_ptr<double>();
+    const double* b = ll_f.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatDeg);
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatDeg);
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatH);
+    }
+}
+
+TEST(RpcStereoFloatCpu, FailedInverseWritesHugeVal) {
+    const RpcInfo left_info = MakeNadirInfoRealistic();
+    const RpcInfo right_info = MakeObliqueInfoRealistic();
+    const RpcStereo stereo(left_info,
+                           right_info,
+                           left_info.height_off - kRaySpanM,
+                           left_info.height_off + kRaySpanM,
+                           StereoPrecision::FloatEnu);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<std::array<double, 2>> left_cr = {{nan, nan}};
+    const std::vector<std::array<double, 2>> right_cr = {{1.0, 1.0}};
+    zt::Tensor left_t = zt::from_blob(
+        const_cast<double*>(left_cr[0].data()), {1, 2}, zt::dtype(zt::kDouble));
+    zt::Tensor right_t = zt::from_blob(const_cast<double*>(right_cr[0].data()),
+                                       {1, 2},
+                                       zt::dtype(zt::kDouble));
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    stereo.triangulate(left_t, right_t, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    EXPECT_EQ(ll[0], HUGE_VAL);
+    EXPECT_EQ(ll[1], HUGE_VAL);
+    EXPECT_EQ(ll[2], HUGE_VAL);
+    EXPECT_EQ(rms.data_ptr<double>()[0], HUGE_VAL);
+}
+
 #ifdef BUILD_CUDA_MODULE
 
 class RpcStereoCudaTest : public ::testing::Test {
@@ -502,6 +642,53 @@ TEST_F(RpcStereoCudaTest, MixedCpuInCudaOutThrows) {
     zt::Tensor rms = zt::zeros({4}, zt::dtype(zt::kDouble)).cuda();
     EXPECT_THROW(stereo.triangulate(left_cr, right_cr, lonlath, rms),
                  std::runtime_error);
+}
+
+TEST_F(RpcStereoCudaTest, FloatEnuMatchesCpu) {
+    const RpcInfo left_info = MakeNadirInfoRealistic();
+    const RpcInfo right_info = MakeObliqueInfoRealistic();
+    const RpcModel left(left_info);
+    const RpcModel right(right_info);
+    const RpcStereo stereo(left_info,
+                           right_info,
+                           left_info.height_off - kRaySpanM,
+                           left_info.height_off + kRaySpanM,
+                           StereoPrecision::FloatEnu);
+
+    const std::vector<Pt> pts = MakePoints(10000, left_info);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor left_cr;
+    zt::Tensor right_cr;
+    left.lonlatalt_to_colrow(in, left_cr);
+    right.lonlatalt_to_colrow(in, right_cr);
+
+    zt::Tensor cpu_ll;
+    zt::Tensor cpu_rms;
+    stereo.triangulate(left_cr, right_cr, cpu_ll, cpu_rms);
+
+    zt::Tensor gpu_ll;
+    zt::Tensor gpu_rms;
+    stereo.triangulate(left_cr.cuda(), right_cr.cuda(), gpu_ll, gpu_rms);
+
+    ASSERT_TRUE(gpu_ll.is_cuda());
+    const zt::Tensor gpu_ll_cpu = gpu_ll.cpu();
+    const zt::Tensor gpu_rms_cpu = gpu_rms.cpu();
+
+    const double* a = cpu_ll.data_ptr<double>();
+    const double* b = gpu_ll_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatCudaDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatCudaDeg)
+            << "point " << i << " lat";
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatCudaH)
+            << "point " << i << " h";
+    }
+    const double* ra = cpu_rms.data_ptr<double>();
+    const double* rb = gpu_rms_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(rb[i], ra[i], kTolFloatCudaH) << "point " << i << " rms";
+    }
 }
 
 #endif  // BUILD_CUDA_MODULE
