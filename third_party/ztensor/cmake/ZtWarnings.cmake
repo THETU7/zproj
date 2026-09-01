@@ -51,10 +51,19 @@ if(NOT TARGET zt::warnings)
         # -Xcompiler when combined with -o + -c, surfacing as the host
         # compiler error "cannot specify -o with -c and multiple files". The
         # dashed form parses cleanly.
+        #
+        # -Wno-unused-local-typedefs: nvcc's host pass cannot see uses of a
+        # local typedef that occur only inside a __device__ lambda, so -Wall's
+        # -Wunused-local-typedefs fires false positives — in our
+        # ZT_DISPATCH_SCALARTYPE_* macros (scalar_t) and inside the vendored
+        # fmt/spdlog headers (char_type, mapped_type, ...). Suppress it for
+        # CUDA TUs only; CXX builds keep the warning (and pass cleanly).
         if(ZT_WARNINGS_AS_ERRORS)
-            set(_zt_nvcc_xcompiler "-Xcompiler=-Wall,-Wextra,-Werror")
+            set(_zt_nvcc_xcompiler
+                "-Xcompiler=-Wall,-Wextra,-Werror,-Wno-unused-local-typedefs")
         else()
-            set(_zt_nvcc_xcompiler "-Xcompiler=-Wall,-Wextra")
+            set(_zt_nvcc_xcompiler
+                "-Xcompiler=-Wall,-Wextra,-Wno-unused-local-typedefs")
         endif()
 
         target_compile_options(zt_warnings INTERFACE

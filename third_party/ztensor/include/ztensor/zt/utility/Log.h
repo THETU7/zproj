@@ -19,7 +19,12 @@
 #include <string_view>
 
 #include <spdlog/fmt/fmt.h>
-#include <spdlog/spdlog.h>
+// NOTE: spdlog core (<spdlog/spdlog.h>) is deliberately NOT included here. It
+// pulls spdlog/common.h, whose constexpr to_string_view(memory_buf_t) calls
+// fmt's non-constexpr buffer::data() under __NVCC__ (fmt disables
+// FMT_USE_CONSTEXPR for nvcc) -> nvcc hard error on spdlog < 1.13. spdlog core
+// is confined to Log.cpp; this header exposes only fmt (compile-time-checked {}
+// formatting) and a zt-owned LogLevel enum, so .cu TUs never parse spdlog.
 
 // A portable __PRETTY_FUNCTION__-like name for log provenance.
 #if defined(__GNUC__) || defined(__clang__)
@@ -32,6 +37,19 @@
 
 namespace zt {
 
+// Log severity. Mirrors spdlog::level::level_enum (trace..off) so the mapping
+// in Log.cpp is trivial. Declared here, fmt-free, so that Log.h needs no spdlog
+// core header (see the include note above) and .cu TUs stay spdlog-free.
+enum class LogLevel : int {
+    Trace = 0,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Critical,
+    Off,
+};
+
 // Centralized logger. Holds the single spdlog logger used by all ZT_LOG_*
 // macros. Thread-safe after Init().
 class Logger {
@@ -41,8 +59,8 @@ public:
     static void Init();
 
     // Replace the default level at runtime.
-    static void SetLevel(spdlog::level::level_enum level);
-    static spdlog::level::level_enum GetLevel();
+    static void SetLevel(LogLevel level);
+    static LogLevel GetLevel();
 
     // ---- formatted log helpers ----
     // Each takes a compile-time-checked fmt format string. ZT_LOG_ERROR
@@ -54,7 +72,7 @@ public:
                          const char* fn,
                          fmt::format_string<Args...> fmt_str,
                          Args&&... args) {
-        log_(spdlog::level::info,
+        log_(LogLevel::Info,
              file,
              line,
              fn,
@@ -67,7 +85,7 @@ public:
                             const char* fn,
                             fmt::format_string<Args...> fmt_str,
                             Args&&... args) {
-        log_(spdlog::level::warn,
+        log_(LogLevel::Warn,
              file,
              line,
              fn,
@@ -89,7 +107,7 @@ private:
     // Lazily ensures the logger is initialized; called from every log path.
     static void ensure_initialized_();
 
-    static void log_(spdlog::level::level_enum lvl,
+    static void log_(LogLevel lvl,
                      const char* file,
                      int line,
                      const char* fn,

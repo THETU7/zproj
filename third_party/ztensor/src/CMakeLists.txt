@@ -25,6 +25,9 @@ set(_zt_public_headers
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Exception.h
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Stream.h
     ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Guard.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Vendor.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/Warp.h
+    ${PROJECT_SOURCE_DIR}/include/ztensor/zt/cuda/VectorIntrinsics.h
 )
 
 # Core sources (compiled in every build; CUDA sources added below).

@@ -14,7 +14,10 @@
 // but the backing temporary lives to the end of the full expression — exactly
 // the lifetime an ArrayRef function argument needs (cf. PyTorch IntArrayRef).
 // Silence the warning for this header only.
-#if defined(__GNUC__) && !defined(__clang__)
+// -Winit-list-lifetime only exists in GCC >= 10. On older GCC (e.g. the 8.5
+// shipped by the manylinux cu118 base) the pragma is an unknown option and
+// trips -Wpragmas (-> -Werror). Gate it on the version that introduced it.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 10
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winit-list-lifetime"
 #endif

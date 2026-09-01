@@ -31,10 +31,9 @@
 // ============================================================================
 // AMD HIP / ROCm
 // ============================================================================
-// Suppress the deprecated masked warp-sync builtins; HIP's shuffles take no
-// mask. (ztensor uses no warp builtins today, but define it for parity with
-// ggml and to silence any transitive header use.)
-#define HIP_DISABLE_WARP_SYNC_BUILTINS 1
+// Warp/wavefront primitives (shuffle + sync) are NOT remapped here; see
+// ztensor/zt/cuda/Warp.h, which wraps the vendor builtins for device TUs.
+// HIP's __shfl_*_sync are intentionally left enabled (default since ROCm 6.2).
 
 // Runtime + BLAS only. The fp16/bf16 *device-type* headers (<hip/hip_fp16.h>,
 // <hip/hip_bf16.h>) are deliberately NOT included here: hip_bf16.h requires the
@@ -100,7 +99,9 @@
 #define cudaMemset hipMemset
 #define cudaSetDevice hipSetDevice
 #define cudaStreamCreate hipStreamCreate
+#define cudaStreamCreateWithFlags hipStreamCreateWithFlags
 #define cudaStreamDestroy hipStreamDestroy
+#define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamWaitEvent hipStreamWaitEvent
 #define cudaStream_t hipStream_t
