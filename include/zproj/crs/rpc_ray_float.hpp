@@ -10,6 +10,16 @@
 // every ray and intersection quantity back on scene scale (km), where float
 // holds sub-millimetre precision.
 //
+// SINGLE SOURCE OF TRUTH: this header adds NO duplicated solver math. The
+// Newton iteration, the polynomial terms, the quotient-rule Jacobian, and
+// the two-ray intersection are the precision-templated implementations in
+// rpc.hpp (rpc_compute_terms, detail::rpc_jac_coeffs,
+// detail::rpc_newton_inverse_core) and rpc_ray.hpp
+// (detail::triangulate_pair_impl), instantiated for float here. Only the
+// float-specific scaffolding lives in this file: the coefficient mirror,
+// the offset-relative seed (with the same +/-270 deg dateline wrap as the
+// double inverse), the ENU frame, and the geodetic <-> ENU narrowing.
+//
 // Accuracy budget (measured, 5 km footprint, GSD 0.1 m): horizontal ~1 mm,
 // height ~2 cm, ray rms ~1.5 mm -- the same order as the double path's
 // chord-approximation error. The float Newton bottoms out at ~1e-2 px (float
@@ -131,7 +141,8 @@ inline RpcInverseInitFloat MakeRpcInverseInitFloat(const RpcInfo& info,
 
 // ENU frame centred between the two models' offset points (the overlap
 // region of a stereo pair). The origin and basis stay double: they carry the
-// 6.4e6 m ECEF magnitudes that float cannot hold.
+// 6.4e6 m ECEF magnitudes that float cannot hold. Valid at any longitude,
+// including dateline-crossing scenes (the frame is purely local).
 inline EnuFrame MakeEnuFrame(const RpcInfo& left, const RpcInfo& right) {
     const double lon = 0.5 * (left.long_off + right.long_off) * kDegToRad;
     const double lat = 0.5 * (left.lat_off + right.lat_off) * kDegToRad;
@@ -176,44 +187,15 @@ ZT_HOST_DEVICE inline Ecef FromEnu(const EnuFrame& frame, const Enu& e) {
                     frame.up.z() * z};
 }
 
-namespace detail {
-
-ZT_HOST_DEVICE inline void rpc_compute_terms_float(float lon_n,
-                                                   float lat_n,
-                                                   float height_n,
-                                                   float* terms) {
-    terms[0] = 1.0f;
-    terms[1] = lon_n;
-    terms[2] = lat_n;
-    terms[3] = height_n;
-    terms[4] = lon_n * lat_n;
-    terms[5] = lon_n * height_n;
-    terms[6] = lat_n * height_n;
-    terms[7] = lon_n * lon_n;
-    terms[8] = lat_n * lat_n;
-    terms[9] = height_n * height_n;
-    terms[10] = lon_n * lat_n * height_n;
-    terms[11] = lon_n * lon_n * lon_n;
-    terms[12] = lon_n * lat_n * lat_n;
-    terms[13] = lon_n * height_n * height_n;
-    terms[14] = lon_n * lon_n * lat_n;
-    terms[15] = lat_n * lat_n * lat_n;
-    terms[16] = lat_n * height_n * height_n;
-    terms[17] = lon_n * lon_n * height_n;
-    terms[18] = lat_n * lat_n * height_n;
-    terms[19] = height_n * height_n * height_n;
-}
-
-}  // namespace detail
-
-// Analytic-Jacobian Newton inverse of the float RPC: the same iteration as
-// rpc_inverse_point_analytic (true local Jacobian, quadratic convergence),
-// evaluated in float in normalized (L, P) space. The float evaluation noise
-// (~1e-7 relative on the residual) floors convergence near 1e-2 px, so
-// `pixel_error_threshold` should stay at GDAL's 0.1 px -- tightening it
-// below the noise floor just burns iterations. lon/lat are returned in
-// degrees, reconstructed in double from the converged (L, P). Identical
-// math on host and device.
+// Analytic-Jacobian Newton inverse of the float RPC: the SAME solver as
+// rpc_inverse_point_analytic (detail::rpc_newton_inverse_core instantiated
+// for float), evaluated on float coefficients in normalized (L, P) space.
+// The float evaluation noise (~1e-7 relative on the residual) floors
+// convergence near 1e-2 px, so `pixel_error_threshold` should stay at GDAL's
+// 0.1 px -- tightening it below the noise floor just burns iterations. The
+// seed longitude is wrapped to the model's hemisphere exactly like the double
+// inverse (dateline parity). lon/lat are returned in degrees, reconstructed
+// in double from the converged (L, P). Identical math on host and device.
 ZT_HOST_DEVICE inline bool rpc_inverse_point_analytic_float(
     const RpcInfoFloat& info,
     const RpcInverseInitFloat& init,
@@ -231,93 +213,41 @@ ZT_HOST_DEVICE inline bool rpc_inverse_point_analytic_float(
     const float tgt_samp = (col_f - info.samp_off - 0.5f) / info.samp_scale;
     const float tgt_line = (row_f - info.line_off - 0.5f) / info.line_scale;
 
-    // Seed (L, P) from the offset-relative affine (float grid is tight
-    // there; no dateline handling -- the seed is scene-local by construction).
-    const float dlon =
+    // Seed (L, P) from the offset-relative affine, wrapped to the model's
+    // hemisphere like rpc_inverse_point_analytic: for dateline scenes the
+    // affine can seed a longitude on the far side of the globe.
+    float dlon =
         init.lon_c0_rel + (init.lon_c1 * col_f) + (init.lon_c2 * row_f);
     const float dlat =
         init.lat_c0_rel + (init.lat_c1 * col_f) + (init.lat_c2 * row_f);
-    float L = dlon / static_cast<float>(info.long_scale);
-    float P = dlat / static_cast<float>(info.lat_scale);
-    const float H =
+    if (dlon < -270.0f) {
+        dlon += 360.0f;
+    } else if (dlon > 270.0f) {
+        dlon -= 360.0f;
+    }
+    const float seed_l = dlon / static_cast<float>(info.long_scale);
+    const float seed_p = dlat / static_cast<float>(info.lat_scale);
+    const float height_n =
         (static_cast<float>(height) - info.height_off) / info.height_scale;
 
-    bool converged = false;
-    for (int i = 0; i < max_iterations; ++i) {
-        std::array<float, kRpcCoeffCount> terms;
-        detail::rpc_compute_terms_float(L, P, H, terms.data());
-
-        float Ns = 0.0f;
-        float Ds = 0.0f;
-        float Nl = 0.0f;
-        float Dl = 0.0f;
-#if defined(__CUDA_ARCH__)
-#pragma unroll
-#endif  // defined(__CUDA_ARCH__)
-        for (int k = 0; k < kRpcCoeffCount; ++k) {
-            Ns = fmaf(terms[k], info.samp_num_coeff[k], Ns);
-            Ds = fmaf(terms[k], info.samp_den_coeff[k], Ds);
-            Nl = fmaf(terms[k], info.line_num_coeff[k], Nl);
-            Dl = fmaf(terms[k], info.line_den_coeff[k], Dl);
-        }
-        const float fs = (Ns / Ds) - tgt_samp;
-        const float fl = (Nl / Dl) - tgt_line;
-
-        const float err =
-            fmaxf(fabsf(fs) * info.samp_scale, fabsf(fl) * info.line_scale);
-        if (err < pixel_error_threshold) {
-            converged = true;
-            break;
-        }
-
-        // Analytic 2x2 Jacobian of (samp_n, line_n) w.r.t. (L, P) at fixed
-        // H, via the quotient rule Q_i = (D*num_i - N*den_i)/D^2 (the float
-        // counterpart of rpc_jac_from_eval).
-        const std::array<float, kRpcCoeffCount> dL = {
-            0.0f,  1.0f,         0.0f,         0.0f,  P,
-            H,     0.0f,         2.0f * L,     0.0f,  0.0f,
-            P * H, 3.0f * L * L, P * P,        H * H, 2.0f * L * P,
-            0.0f,  0.0f,         2.0f * L * H, 0.0f,  0.0f};
-        const std::array<float, kRpcCoeffCount> dP = {
-            0.0f,         0.0f,  1.0f,         0.0f,         L,
-            0.0f,         H,     0.0f,         2.0f * P,     0.0f,
-            L * H,        0.0f,  2.0f * L * P, 0.0f,         L * L,
-            3.0f * P * P, H * H, 0.0f,         2.0f * P * H, 0.0f};
-        const float inv_Ds2 = 1.0f / (Ds * Ds);
-        const float inv_Dl2 = 1.0f / (Dl * Dl);
-        float js_ll = 0.0f;
-        float js_lp = 0.0f;
-        float jl_ll = 0.0f;
-        float jl_lp = 0.0f;
-#if defined(__CUDA_ARCH__)
-#pragma unroll
-#endif  // defined(__CUDA_ARCH__)
-        for (int k = 0; k < kRpcCoeffCount; ++k) {
-            const float Qs = ((Ds * info.samp_num_coeff[k]) -
-                              (Ns * info.samp_den_coeff[k])) *
-                             inv_Ds2;
-            const float Ql = ((Dl * info.line_num_coeff[k]) -
-                              (Nl * info.line_den_coeff[k])) *
-                             inv_Dl2;
-            js_ll = fmaf(Qs, dL[k], js_ll);
-            js_lp = fmaf(Qs, dP[k], js_lp);
-            jl_ll = fmaf(Ql, dL[k], jl_ll);
-            jl_lp = fmaf(Ql, dP[k], jl_lp);
-        }
-
-        const float det = (js_ll * jl_lp) - (js_lp * jl_ll);
-        if (det == 0.0f || !std::isfinite(det)) {
-            break;  // singular / degenerate Jacobian
-        }
-        const float inv_det = 1.0f / det;
-
-        // Newton step in normalized space.
-        L -= (jl_lp * fs - js_lp * fl) * inv_det;
-        P -= (-(jl_ll * fs) + (js_ll * fl)) * inv_det;
-        if (!std::isfinite(L) || !std::isfinite(P)) {
-            break;
-        }
-    }
+    float L = 0.0f;
+    float P = 0.0f;
+    const bool converged =
+        detail::rpc_newton_inverse_core(info.samp_num_coeff,
+                                        info.samp_den_coeff,
+                                        info.line_num_coeff,
+                                        info.line_den_coeff,
+                                        tgt_samp,
+                                        tgt_line,
+                                        seed_l,
+                                        seed_p,
+                                        height_n,
+                                        info.samp_scale,
+                                        info.line_scale,
+                                        pixel_error_threshold,
+                                        max_iterations,
+                                        L,
+                                        P);
 
     // Reconstruct lon/lat in double: L/P carry ~1e-7 relative float error,
     // and the double scales/offsets must not add quantization on top.
@@ -391,55 +321,15 @@ ZT_HOST_DEVICE inline bool rpc_ray_enu(const RpcInfoFloat& info,
 }
 
 // Two-view intersection in the ENU frame (float): midpoint of the closest
-// points on the two rays, the same closed form as the double
-// triangulate_pair. Sets `err` to the distance between the closest points
-// [m]. Returns false if the rays are parallel.
+// points on the two rays. Sets `err` to the distance between the closest
+// points [m]. Returns false if the rays are parallel. Float wrapper over the
+// precision-generic detail::triangulate_pair_impl (rpc_ray.hpp), shared with
+// the double path.
 ZT_HOST_DEVICE inline bool triangulate_pair(const RpcRayEnu& a,
                                             const RpcRayEnu& b,
                                             Enu& p,
                                             float& err) noexcept {
-    const float v12x = (a.dir.y() * b.dir.z()) - (a.dir.z() * b.dir.y());
-    const float v12y = (a.dir.z() * b.dir.x()) - (a.dir.x() * b.dir.z());
-    const float v12z = (a.dir.x() * b.dir.y()) - (a.dir.y() * b.dir.x());
-    const float v1x = (v12y * a.dir.z()) - (v12z * a.dir.y());
-    const float v1y = (v12z * a.dir.x()) - (v12x * a.dir.z());
-    const float v1z = (v12x * a.dir.y()) - (v12y * a.dir.x());
-    const float v2x = (v12y * b.dir.z()) - (v12z * b.dir.y());
-    const float v2y = (v12z * b.dir.x()) - (v12x * b.dir.z());
-    const float v2z = (v12x * b.dir.y()) - (v12y * b.dir.x());
-
-    // dot(v2, dir_a) = -sin^2 of the convergence angle (unit directions);
-    // the threshold is the float counterpart of the double 1e-12.
-    const float den_a =
-        (v2x * a.dir.x()) + (v2y * a.dir.y()) + (v2z * a.dir.z());
-    const float den_b =
-        (v1x * b.dir.x()) + (v1y * b.dir.y()) + (v1z * b.dir.z());
-    if (fabsf(den_a) <= 1e-10f || fabsf(den_b) <= 1e-10f) {
-        return false;
-    }
-
-    const float wx = b.origin.x() - a.origin.x();
-    const float wy = b.origin.y() - a.origin.y();
-    const float wz = b.origin.z() - a.origin.z();
-    const float ta = ((v2x * wx) + (v2y * wy) + (v2z * wz)) / den_a;
-    const float ux = a.origin.x() - b.origin.x();
-    const float uy = a.origin.y() - b.origin.y();
-    const float uz = a.origin.z() - b.origin.z();
-    const float tb = ((v1x * ux) + (v1y * uy) + (v1z * uz)) / den_b;
-
-    const float cax = a.origin.x() + (a.dir.x() * ta);
-    const float cay = a.origin.y() + (a.dir.y() * ta);
-    const float caz = a.origin.z() + (a.dir.z() * ta);
-    const float cbx = b.origin.x() + (b.dir.x() * tb);
-    const float cby = b.origin.y() + (b.dir.y() * tb);
-    const float cbz = b.origin.z() + (b.dir.z() * tb);
-
-    p = Enu{0.5f * (cax + cbx), 0.5f * (cay + cby), 0.5f * (caz + cbz)};
-    const float ex = cax - cbx;
-    const float ey = cay - cby;
-    const float ez = caz - cbz;
-    err = sqrtf((ex * ex) + (ey * ey) + (ez * ez));
-    return true;
+    return detail::triangulate_pair_impl(a, b, p, err);
 }
 
 }  // namespace zproj::crs

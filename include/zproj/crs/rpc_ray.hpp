@@ -34,26 +34,70 @@ struct RpcRay {
 
 namespace detail {
 
-ZT_HOST_DEVICE inline double vec_dot(const Ecef& a, const Ecef& b) noexcept {
-    return (a.x() * b.x()) + (a.y() * b.y()) + (a.z() * b.z());
+// Parallelism threshold on dot(v2, dir_a) = -sin^2 of the convergence angle
+// (unit directions): the double reference uses 1e-12; float evaluation noise
+// keeps the float instantiation at 1e-10. Both are far below any physical
+// convergence angle -- the guard only catches truly parallel/coplanar rays.
+template<typename T>
+ZT_HOST_DEVICE inline constexpr T kParallelDenTol() noexcept {
+    if constexpr (sizeof(T) == 4) {
+        return T(1e-10);
+    } else {
+        return T(1e-12);
+    }
 }
 
-ZT_HOST_DEVICE inline Ecef vec_cross(const Ecef& a, const Ecef& b) noexcept {
-    return Ecef{(a.y() * b.z()) - (a.z() * b.y()),
-                (a.z() * b.x()) - (a.x() * b.z()),
-                (a.x() * b.y()) - (a.y() * b.x())};
-}
+// Closed-form two-ray intersection, generic over the ray/vector scalar type:
+// ONE implementation of the geometry, instantiated for Ecef/double (below)
+// and Enu/float (rpc_ray_float.hpp). The vector type only needs arithmetic
+// .x()/.y()/.z() components.
+template<typename RayT, typename Vec3, typename T>
+ZT_HOST_DEVICE inline bool triangulate_pair_impl(const RayT& a,
+                                                 const RayT& b,
+                                                 Vec3& p,
+                                                 T& err) noexcept {
+    // v12 = cross(dir_a, dir_b); v1 = cross(v12, dir_a); v2 = cross(v12,
+    // dir_b).
+    const T v12x = (a.dir.y() * b.dir.z()) - (a.dir.z() * b.dir.y());
+    const T v12y = (a.dir.z() * b.dir.x()) - (a.dir.x() * b.dir.z());
+    const T v12z = (a.dir.x() * b.dir.y()) - (a.dir.y() * b.dir.x());
+    const T v1x = (v12y * a.dir.z()) - (v12z * a.dir.y());
+    const T v1y = (v12z * a.dir.x()) - (v12x * a.dir.z());
+    const T v1z = (v12x * a.dir.y()) - (v12y * a.dir.x());
+    const T v2x = (v12y * b.dir.z()) - (v12z * b.dir.y());
+    const T v2y = (v12z * b.dir.x()) - (v12x * b.dir.z());
+    const T v2z = (v12x * b.dir.y()) - (v12y * b.dir.x());
 
-ZT_HOST_DEVICE inline Ecef vec_sub(const Ecef& a, const Ecef& b) noexcept {
-    return Ecef{a.x() - b.x(), a.y() - b.y(), a.z() - b.z()};
-}
+    // For unit directions, dot(v2, dir_a) = (dir_a . dir_b)^2 - 1 = -sin^2
+    // of the convergence angle: zero exactly when the rays are parallel (the
+    // sign is irrelevant -- the threshold below uses fabs).
+    const T den_a = (v2x * a.dir.x()) + (v2y * a.dir.y()) + (v2z * a.dir.z());
+    const T den_b = (v1x * b.dir.x()) + (v1y * b.dir.y()) + (v1z * b.dir.z());
+    constexpr T kTol = kParallelDenTol<T>();
+    if (fabs(den_a) <= kTol || fabs(den_b) <= kTol) {
+        return false;
+    }
 
-ZT_HOST_DEVICE inline Ecef vec_add(const Ecef& a, const Ecef& b) noexcept {
-    return Ecef{a.x() + b.x(), a.y() + b.y(), a.z() + b.z()};
-}
+    const T wx = b.origin.x() - a.origin.x();
+    const T wy = b.origin.y() - a.origin.y();
+    const T wz = b.origin.z() - a.origin.z();
+    const T ta = ((v2x * wx) + (v2y * wy) + (v2z * wz)) / den_a;
+    const T ux = a.origin.x() - b.origin.x();
+    const T uy = a.origin.y() - b.origin.y();
+    const T uz = a.origin.z() - b.origin.z();
+    const T tb = ((v1x * ux) + (v1y * uy) + (v1z * uz)) / den_b;
 
-ZT_HOST_DEVICE inline Ecef vec_scale(const Ecef& a, double s) noexcept {
-    return Ecef{a.x() * s, a.y() * s, a.z() * s};
+    const T cax = a.origin.x() + (a.dir.x() * ta);
+    const T cay = a.origin.y() + (a.dir.y() * ta);
+    const T caz = a.origin.z() + (a.dir.z() * ta);
+    const T cbx = b.origin.x() + (b.dir.x() * tb);
+    const T cby = b.origin.y() + (b.dir.y() * tb);
+    const T cbz = b.origin.z() + (b.dir.z() * tb);
+
+    p = Vec3{T(0.5) * (cax + cbx), T(0.5) * (cay + cby), T(0.5) * (caz + cbz)};
+    err = sqrt(((cax - cbx) * (cax - cbx)) + ((cay - cby) * (cay - cby)) +
+               ((caz - cbz) * (caz - cbz)));
+    return true;
 }
 
 }  // namespace detail
@@ -126,46 +170,13 @@ ZT_HOST_DEVICE inline bool rpc_ray(const RpcInfo& info,
 // Two-view intersection (closed form, cross-product): midpoint of the closest
 // points on the two rays. Sets `err` to the distance between the closest
 // points [m] (0 = perfect intersection). Returns false if rays are parallel.
+// Double wrapper over the precision-generic detail::triangulate_pair_impl,
+// which is shared with the float ENU path.
 ZT_HOST_DEVICE inline bool triangulate_pair(const RpcRay& a,
                                             const RpcRay& b,
                                             Ecef& p,
                                             double& err) noexcept {
-    using detail::vec_add;
-    using detail::vec_cross;
-    using detail::vec_dot;
-    using detail::vec_scale;
-    using detail::vec_sub;
-
-    // v12 = cross(dir_a, dir_b); v1 = cross(v12, dir_a); v2 = cross(v12,
-    // dir_b).
-    const Ecef v12 = vec_cross(a.dir, b.dir);
-    const Ecef v1 = vec_cross(v12, a.dir);
-    const Ecef v2 = vec_cross(v12, b.dir);
-
-    // For unit directions, dot(v2, dir_a) = (dir_a . dir_b)^2 - 1 = -sin^2 of
-    // the convergence angle: zero exactly when the rays are parallel (the sign
-    // is irrelevant -- the threshold below uses fabs).
-    const double den_a = vec_dot(v2, a.dir);
-    const double den_b = vec_dot(v1, b.dir);
-    if (fabs(den_a) <= 1e-12 || fabs(den_b) <= 1e-12) {
-        return false;
-    }
-
-    const Ecef closest_a = vec_add(
-        a.origin,
-        vec_scale(a.dir, vec_dot(v2, vec_sub(b.origin, a.origin)) / den_a));
-    const Ecef closest_b = vec_add(
-        b.origin,
-        vec_scale(b.dir, vec_dot(v1, vec_sub(a.origin, b.origin)) / den_b));
-
-    p = Ecef{0.5 * (closest_a.x() + closest_b.x()),
-             0.5 * (closest_a.y() + closest_b.y()),
-             0.5 * (closest_a.z() + closest_b.z())};
-    err =
-        sqrt((closest_a.x() - closest_b.x()) * (closest_a.x() - closest_b.x()) +
-             (closest_a.y() - closest_b.y()) * (closest_a.y() - closest_b.y()) +
-             (closest_a.z() - closest_b.z()) * (closest_a.z() - closest_b.z()));
-    return true;
+    return detail::triangulate_pair_impl(a, b, p, err);
 }
 
 namespace detail {

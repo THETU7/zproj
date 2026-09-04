@@ -82,11 +82,17 @@ constexpr double kTolRmsM = 1e-3;
 // Float (ENU) path tolerances, measured on the realistic 5 km footprint:
 // the float Newton floors at ~1e-2 px (float evaluation noise), which lands
 // ~1e-3 deg-scale horizontal error at 1e-8 deg and ~2e-2 m height error --
-// both at or below the double path's chord-approximation error. The
-// tolerances below keep an order-of-magnitude margin.
+// both at or below the double path's chord-approximation error.
 constexpr double kTolFloatDeg = 1e-6;
 constexpr double kTolFloatH = 0.1;
 constexpr double kTolFloatRmsM = 0.01;
+// Tight float-vs-double drift tripwire (CPU only, so deterministic): the
+// measured max deviation on the realistic footprint is ~1e-8 deg / ~2e-2 m;
+// these leave one order of magnitude of margin while staying tight enough
+// to catch solver drift between the shared-template instantiations.
+constexpr double kTolFloatVsDoubleDeg = 1e-7;
+constexpr double kTolFloatVsDoubleH = 0.05;
+constexpr double kTolFloatVsDoubleRmsM = 1e-2;
 // Float CPU vs CUDA: float rounding of the ENU quantities plus the usual
 // transcendental differences; measured ~1e-8 deg.
 constexpr double kTolFloatCudaDeg = 1e-5;
@@ -501,14 +507,18 @@ TEST(RpcStereoFloatCpu, ClosedLoopRealisticFootprint) {
 }
 
 // The float path must stay within its documented error of the double
-// reference on the same points (accuracy regression tripwire).
+// reference on the same points. This is the drift tripwire between the two
+// instantiations of the shared solver templates (rpc_compute_terms /
+// detail::rpc_jac_coeffs / detail::rpc_newton_inverse_core /
+// detail::triangulate_pair_impl), so its tolerances are as tight as the
+// float noise floor allows.
 TEST(RpcStereoFloatCpu, MatchesDoublePath) {
     const RpcInfo left_info = MakeNadirInfoRealistic();
     const RpcInfo right_info = MakeObliqueInfoRealistic();
     const RpcModel left(left_info);
     const RpcModel right(right_info);
 
-    const std::vector<Pt> pts = MakePoints(256, left_info);
+    const std::vector<Pt> pts = MakePoints(1024, left_info);
     zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
     zt::Tensor left_cr;
     zt::Tensor right_cr;
@@ -530,11 +540,143 @@ TEST(RpcStereoFloatCpu, MatchesDoublePath) {
 
     const double* a = ll_d.data_ptr<double>();
     const double* b = ll_f.data_ptr<double>();
+    const double* ra = rms_d.data_ptr<double>();
+    const double* rb = rms_f.data_ptr<double>();
     for (std::size_t i = 0; i < pts.size(); ++i) {
         SCOPED_TRACE("point " + std::to_string(i));
-        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatDeg);
-        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatDeg);
-        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatH);
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatVsDoubleH);
+        EXPECT_NEAR(rb[i], ra[i], kTolFloatVsDoubleRmsM);
+    }
+}
+
+// Dateline parity: the float inverse must wrap a seed longitude that lands
+// on the far side of the globe, exactly like the double analytic inverse.
+// Shift the affine seed by -360 deg and require both solvers to still
+// converge to the unshifted answer.
+TEST(RpcStereoFloatCpu, SeedWrapMatchesDouble) {
+    const RpcInfo left_info = MakeNadirInfoRealistic();
+    const RpcModel left(left_info);
+    const RpcInverseInit init = left.inverse_init();
+
+    // A seed shifted by -360 deg: without the +/-270 deg wrap the Newton
+    // iteration would start a full revolution away and fail or diverge.
+    RpcInverseInit shifted = init;
+    shifted.lon_c0 -= 360.0;
+    const zproj::crs::RpcInverseInitFloat init_f =
+        zproj::crs::MakeRpcInverseInitFloat(left_info, shifted);
+    const zproj::crs::RpcInfoFloat info_f =
+        zproj::crs::MakeRpcInfoFloat(left_info);
+
+    const std::vector<Pt> pts = MakePoints(64, left_info);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        double col = 0.0;
+        double row = 0.0;
+        zproj::crs::rpc_forward_point(
+            left_info, pts[i].lon, pts[i].lat, pts[i].alt, col, row);
+
+        double lon_d = 0.0;
+        double lat_d = 0.0;
+        ASSERT_TRUE(zproj::crs::rpc_inverse_point_analytic(
+            left_info, shifted, col, row, pts[i].alt, lon_d, lat_d, 1e-9, 20));
+
+        double lon_f = 0.0;
+        double lat_f = 0.0;
+        ASSERT_TRUE(zproj::crs::rpc_inverse_point_analytic_float(
+            info_f, init_f, col, row, pts[i].alt, lon_f, lat_f, 0.1f, 20));
+
+        // The double wrap recovers machine precision; the float wrap recovers
+        // the float floor. Both must agree with the ground truth.
+        EXPECT_NEAR(lon_d, pts[i].lon, 1e-9);
+        EXPECT_NEAR(lat_d, pts[i].lat, 1e-9);
+        EXPECT_NEAR(lon_f, pts[i].lon, 1e-6);
+        EXPECT_NEAR(lat_f, pts[i].lat, 1e-6);
+    }
+}
+
+// End-to-end dateline scene: a stereo pair straddling the 180 deg meridian
+// (points expressed with lon on both sides), triangulated in FloatEnu.
+TEST(RpcStereoFloatCpu, DatelineScene) {
+    RpcInfo left_info = MakeNadirInfoRealistic();
+    // Centre the window on the dateline: 179.98 +/- 0.025 deg.
+    left_info.long_off = 179.98;
+    left_info.min_lon = 179.955;
+    left_info.max_lon = 180.005;
+    RpcInfo right_info = MakeObliqueInfoRealistic();
+    right_info.long_off = 179.98;
+    right_info.min_lon = 179.955;
+    right_info.max_lon = 180.005;
+    const RpcModel left(left_info);
+    const RpcModel right(right_info);
+
+    // Ground points across the meridian; lon > 180 is expressed as its
+    // -360 deg equivalent (the convention geodetic coordinates use).
+    const std::size_t n = 128;
+    std::vector<Pt> pts(n);
+    {
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<double> lon(179.955, 180.005);
+        std::uniform_real_distribution<double> lat(left_info.lat_off - 0.02,
+                                                   left_info.lat_off + 0.02);
+        std::uniform_real_distribution<double> alt(left_info.height_off - 250,
+                                                   left_info.height_off + 250);
+        for (std::size_t i = 0; i < n; ++i) {
+            double lon_deg = lon(rng);
+            if (lon_deg > 180.0) {
+                lon_deg -= 360.0;
+            }
+            pts[i] = Pt{lon_deg, lat(rng), alt(rng)};
+        }
+    }
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor left_cr;
+    zt::Tensor right_cr;
+    left.lonlatalt_to_colrow(in, left_cr);
+    right.lonlatalt_to_colrow(in, right_cr);
+
+    const RpcStereo stereo_d(left_info,
+                             right_info,
+                             left_info.height_off - kRaySpanM,
+                             left_info.height_off + kRaySpanM);
+    const RpcStereo stereo_f(left_info,
+                             right_info,
+                             left_info.height_off - kRaySpanM,
+                             left_info.height_off + kRaySpanM,
+                             StereoPrecision::FloatEnu);
+    zt::Tensor ll_d;
+    zt::Tensor rms_d;
+    stereo_d.triangulate(left_cr, right_cr, ll_d, rms_d);
+    zt::Tensor ll_f;
+    zt::Tensor rms_f;
+    stereo_f.triangulate(left_cr, right_cr, ll_f, rms_f);
+
+    // from_ecef returns lon on the (-180, 180] branch (atan2), so compare
+    // longitudes through the branch-agnostic wrapped difference.
+    const auto LonDelta = [](double out_lon, double truth_lon) {
+        double d = out_lon - truth_lon;
+        if (d > 180.0) {
+            d -= 360.0;
+        } else if (d < -180.0) {
+            d += 360.0;
+        }
+        return d;
+    };
+    const double* a = ll_d.data_ptr<double>();
+    const double* b = ll_f.data_ptr<double>();
+    for (std::size_t i = 0; i < n; ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(LonDelta(a[3 * i + 0], pts[i].lon), 0.0, kTolClosedLoopDeg);
+        EXPECT_NEAR(a[3 * i + 1], pts[i].lat, kTolClosedLoopDeg);
+        EXPECT_NEAR(a[3 * i + 2], pts[i].alt, kTolClosedLoopH);
+        EXPECT_NEAR(LonDelta(b[3 * i + 0], pts[i].lon), 0.0, kTolFloatDeg);
+        EXPECT_NEAR(b[3 * i + 1], pts[i].lat, kTolFloatDeg);
+        EXPECT_NEAR(b[3 * i + 2], pts[i].alt, kTolFloatH);
+        // Both outputs take the same atan2 branch, so their difference needs
+        // no wrapping.
+        EXPECT_NEAR(b[3 * i + 0] - a[3 * i + 0], 0.0, kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 1] - a[3 * i + 1], 0.0, kTolFloatVsDoubleDeg);
     }
 }
 

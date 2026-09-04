@@ -26,7 +26,9 @@ enum class StereoPrecision {
     // (rpc_ray_float.hpp): ~4x faster on consumer GeForce, millimetre-level
     // on scene-sized footprints (scales with footprint/GSD; continental
     // scenes degrade toward metres). Geodetic<->cartesian stays double.
-    // SLOWER than Double on CPU -- a GPU path.
+    // Dateline-crossing scenes are supported: the float inverse seeds and
+    // wraps the longitude exactly like the double path (+/-270 deg rule).
+    // No speedup on CPU -- it exists for the GPU (see below).
     FloatEnu,
 };
 
