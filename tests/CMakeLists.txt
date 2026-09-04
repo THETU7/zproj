@@ -30,3 +30,12 @@ add_executable(test_triangulation test_triangulation.cpp)
 target_link_libraries(test_triangulation PRIVATE zproj GTest::gtest)
 include(GoogleTest)
 gtest_discover_tests(test_triangulation)
+
+# RPC affine bias-correction solver (Ceres): synthetic corruption-recovery
+# tests. Skipped entirely when ZPROJ_BUILD_RPC_REFINE=OFF.
+if(TARGET zproj::refine)
+    add_executable(test_rpc_affine test_rpc_affine.cpp)
+    target_link_libraries(test_rpc_affine PRIVATE zproj zproj::refine GTest::gtest)
+    include(GoogleTest)
+    gtest_discover_tests(test_rpc_affine)
+endif()
