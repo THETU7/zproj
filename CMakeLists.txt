@@ -235,6 +235,26 @@ include(cmake/warnings.cmake)
 zproj_enable_warnings(zproj)
 
 # ---------------------------------------------------------------------------
+# RPC affine refinement (zproj_refine): the Ceres-based solver for image-space
+# RPC bias correction (rpc_affine.hpp). A separate static library so the core
+# zproj target stays Ceres-free; its public headers carry no Ceres includes.
+# ---------------------------------------------------------------------------
+option(ZPROJ_BUILD_RPC_REFINE
+       "Build the Ceres-based RPC affine refinement library (zproj_refine)" ON)
+if(ZPROJ_BUILD_RPC_REFINE)
+    find_package(Ceres 2.2 CONFIG REQUIRED)
+    add_library(zproj_refine STATIC src/crs/rpc_affine.cpp)
+    add_library(zproj::refine ALIAS zproj_refine)
+    target_link_libraries(zproj_refine
+        PUBLIC
+            zproj
+        PRIVATE
+            Ceres::ceres
+    )
+    zproj_enable_warnings(zproj_refine)
+endif()
+
+# ---------------------------------------------------------------------------
 # Subdirectories
 # ---------------------------------------------------------------------------
 if(ZPROJ_BUILD_EXAMPLES)

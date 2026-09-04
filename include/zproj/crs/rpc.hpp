@@ -135,46 +135,65 @@ ZT_HOST_DEVICE inline void rpc_compute_terms(T lon_n,
     terms[19] = height_n * height_n * height_n;
 }
 
+namespace detail {
+
+// Templated forward rational-polynomial evaluation: ONE implementation shared
+// by the double reference (rpc_forward_point) and scalar-substituting callers
+// -- the RPC affine refinement's Ceres autodiff cost functions evaluate it on
+// ceres::Jet. Derivative types compare on their value part, and the +/-360
+// dateline correction is a constant offset, so derivatives pass through the
+// branch unchanged. Identical math on host and device.
+template<typename T>
+ZT_HOST_DEVICE inline void rpc_forward_point_core(
+    const RpcInfo& info, T lon, T lat, T height, T& col, T& row) {
+    // Avoid dateline issues (GDAL RPCTransformPoint).
+    T diff_long = lon - T(info.long_off);
+    if (diff_long < T(-270.0)) {
+        diff_long += T(360.0);
+    } else if (diff_long > T(270.0)) {
+        diff_long -= T(360.0);
+    }
+
+    const T lon_n = diff_long / T(info.long_scale);
+    const T lat_n = (lat - T(info.lat_off)) / T(info.lat_scale);
+    const T height_n = (height - T(info.height_off)) / T(info.height_scale);
+
+    std::array<T, kRpcCoeffCount> terms;
+    rpc_compute_terms(lon_n, lat_n, height_n, terms.data());
+
+    T line_num = T(0);
+    T line_den = T(0);
+    T samp_num = T(0);
+    T samp_den = T(0);
+    for (int i = 0; i < kRpcCoeffCount; ++i) {
+        line_num += terms[i] * T(info.line_num_coeff[i]);
+        line_den += terms[i] * T(info.line_den_coeff[i]);
+        samp_num += terms[i] * T(info.samp_num_coeff[i]);
+        samp_den += terms[i] * T(info.samp_den_coeff[i]);
+    }
+
+    // RPCs use the centre of the upper-left pixel as (0, 0); convert to
+    // GDAL's top-left-corner convention by adding half a pixel.
+    col = ((samp_num / samp_den) * T(info.samp_scale)) + T(info.samp_off) +
+          T(0.5);
+    row = ((line_num / line_den) * T(info.line_scale)) + T(info.line_off) +
+          T(0.5);
+}
+
+}  // namespace detail
+
 // Forward RPC evaluation: (lon, lat, height) in degrees / model units ->
 // (col, row) in GDAL's "top-left corner of pixel (0,0)" convention (RPCs are
 // defined on pixel centres, hence the +0.5). Dateline wrapping matches GDAL's
-// RPCTransformPoint(). Identical math on host and device.
+// RPCTransformPoint(). Thin double wrapper over the precision-templated
+// detail::rpc_forward_point_core. Identical math on host and device.
 ZT_HOST_DEVICE inline void rpc_forward_point(const RpcInfo& info,
                                              double lon,
                                              double lat,
                                              double height,
                                              double& col,
                                              double& row) {
-    // Avoid dateline issues (GDAL RPCTransformPoint).
-    double diff_long = lon - info.long_off;
-    if (diff_long < -270.0) {
-        diff_long += 360.0;
-    } else if (diff_long > 270.0) {
-        diff_long -= 360.0;
-    }
-
-    const double lon_n = diff_long / info.long_scale;
-    const double lat_n = (lat - info.lat_off) / info.lat_scale;
-    const double height_n = (height - info.height_off) / info.height_scale;
-
-    std::array<double, kRpcCoeffCount> terms;
-    rpc_compute_terms(lon_n, lat_n, height_n, terms.data());
-
-    double line_num = 0.0;
-    double line_den = 0.0;
-    double samp_num = 0.0;
-    double samp_den = 0.0;
-    for (int i = 0; i < kRpcCoeffCount; ++i) {
-        line_num += terms[i] * info.line_num_coeff[i];
-        line_den += terms[i] * info.line_den_coeff[i];
-        samp_num += terms[i] * info.samp_num_coeff[i];
-        samp_den += terms[i] * info.samp_den_coeff[i];
-    }
-
-    // RPCs use the centre of the upper-left pixel as (0, 0); convert to
-    // GDAL's top-left-corner convention by adding half a pixel.
-    col = ((samp_num / samp_den) * info.samp_scale) + info.samp_off + 0.5;
-    row = ((line_num / line_den) * info.line_scale) + info.line_off + 0.5;
+    detail::rpc_forward_point_core<double>(info, lon, lat, height, col, row);
 }
 
 // Iterative inverse: (col, row, height) -> (lon, lat). Seeds the Newton loop
