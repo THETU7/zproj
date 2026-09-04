@@ -35,8 +35,9 @@
 #include "zproj/crs/wgs84.hpp"
 #include "ztensor/zt/ScalarType.h"
 #include "ztensor/zt/Tensor.h"
-#include "ztensor/zt/TensorFactories.h"
 #include "ztensor/zt/utility/Log.h"
+
+#include "synthetic_rpc.hpp"
 
 namespace {
 
@@ -54,6 +55,14 @@ using zproj::crs::StereoPrecision;
 using zproj::crs::to_ecef;
 using zproj::crs::triangulate_nview;
 using zproj::crs::triangulate_pair;
+using zproj_test::EcefDist;
+using zproj_test::MakeNadirInfo;
+using zproj_test::MakeNadirInfoRealistic;
+using zproj_test::MakeObliqueInfo;
+using zproj_test::MakeObliqueInfoRealistic;
+using zproj_test::MakePoints;
+using zproj_test::PointTensor;
+using zproj_test::Pt;
 
 // Closed-loop lon/lat tolerance in degrees: the analytic inverse converges to
 // ~1e-9 px, and the synthetic models map ~5000 px per degree, so a ray end
@@ -104,111 +113,6 @@ constexpr double kTolFloatCudaH = 1e-2;
 // curved RPC back-projection locus (the error scales with span^2). +/-50 m is
 // still far above the numerical-stability floor for the ray direction.
 constexpr double kRaySpanM = 50.0;
-
-// Nadir-ish model: col = lon, row = lat (height-independent), so the ray
-// through any pixel is the geodetic vertical line.
-RpcInfo MakeNadirInfo() {
-    RpcInfo info;
-    info.line_off = 25000.0;
-    info.samp_off = 50000.0;
-    info.lat_off = 30.0;
-    info.long_off = 100.0;
-    info.height_off = 500.0;
-    info.line_scale = 50000.0;
-    info.samp_scale = 50000.0;
-    info.lat_scale = 10.0;
-    info.long_scale = 10.0;
-    info.height_scale = 500.0;
-
-    // row = lat
-    info.line_num_coeff[2] = 1.0;  // lat
-    info.line_den_coeff[0] = 1.0;
-    // col = lon
-    info.samp_num_coeff[1] = 1.0;  // lon
-    info.samp_den_coeff[0] = 1.0;
-
-    info.min_lon = 90.0;
-    info.min_lat = 20.0;
-    info.max_lon = 110.0;
-    info.max_lat = 40.0;
-    return info;
-}
-
-// Oblique model: col = lon + k*h (height coupling), row = lat. The ray
-// through a pixel leans as the back-projected longitude shifts with height,
-// so its ray genuinely converges with the nadir model's vertical ray.
-RpcInfo MakeObliqueInfo() {
-    RpcInfo info = MakeNadirInfo();
-    // k = 1e-4 in normalized space: ~10 px of col shift across the full
-    // +/-height_scale range, and a ~11 deg lean vs the vertical ray.
-    info.samp_num_coeff[3] = 1e-4;  // height
-    return info;
-}
-
-// Realistic-footprint variants of the two models above: same 50000 px image,
-// but a 0.05 deg (~5 km) ground window (GSD ~0.1 m) -- the scale of a real
-// satellite scene, and the regime the float ENU path is designed for (its
-// float grid error scales with the footprint). The oblique height coupling
-// is rescaled to keep the same ~11 deg ray convergence.
-RpcInfo MakeNadirInfoRealistic() {
-    RpcInfo info = MakeNadirInfo();
-    info.lat_scale = 0.05;
-    info.long_scale = 0.05;
-    info.min_lon = info.long_off - 0.05;
-    info.max_lon = info.long_off + 0.05;
-    info.min_lat = info.lat_off - 0.05;
-    info.max_lat = info.lat_off + 0.05;
-    return info;
-}
-
-RpcInfo MakeObliqueInfoRealistic() {
-    RpcInfo info = MakeNadirInfoRealistic();
-    // k * height_scale / ground window ~ tan(11 deg) over the height span.
-    info.samp_num_coeff[3] = 0.02;
-    return info;
-}
-
-// Deterministic random lon/lat/alt points inside the models' validity bounds.
-struct Pt {
-    double lon;
-    double lat;
-    double alt;
-};
-
-std::vector<Pt> MakePoints(std::size_t n, const RpcInfo& info) {
-    std::mt19937 rng(42);
-    std::uniform_real_distribution<double> lon(
-        info.long_off - 0.5 * info.long_scale,
-        info.long_off + 0.5 * info.long_scale);
-    std::uniform_real_distribution<double> lat(
-        info.lat_off - 0.5 * info.lat_scale,
-        info.lat_off + 0.5 * info.lat_scale);
-    std::uniform_real_distribution<double> alt(
-        info.height_off - 0.5 * info.height_scale,
-        info.height_off + 0.5 * info.height_scale);
-
-    std::vector<Pt> pts(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        pts[i] = Pt{lon(rng), lat(rng), alt(rng)};
-    }
-    return pts;
-}
-
-// Wrap a host vector of (lon, lat, alt) points as a non-owning [N, 3] double
-// tensor. `pts` must outlive the returned tensor.
-zt::Tensor PointTensor(std::vector<Pt>& pts) {
-    return zt::from_blob(pts.data(),
-                         {static_cast<int64_t>(pts.size()), 3},
-                         zt::dtype(zt::kDouble));
-}
-
-// ECEF norm of a difference (host-only helper).
-double EcefDist(const Ecef& a, const Ecef& b) {
-    const double dx = a.x() - b.x();
-    const double dy = a.y() - b.y();
-    const double dz = a.z() - b.z();
-    return std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
-}
 
 #ifdef BUILD_CUDA_MODULE
 bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
