@@ -28,3 +28,13 @@ target_link_libraries(ztensor_basic PRIVATE zt::ztensor ${_zproj_gpu_runtime})
 # a ray-height-span accuracy sweep.
 add_executable(triangulation triangulation/main.cpp)
 target_link_libraries(triangulation PRIVATE zproj)
+
+# RPC affine bias-correction demo (Ceres): recover a known affine corruption
+# of a synthetic stereo pair from noisy matches with outliers; reports the
+# recovered vs true affines, before/after reprojection RMS, and the ground
+# accuracy of corrected vs raw triangulation. Built only with
+# ZPROJ_BUILD_RPC_REFINE=ON.
+if(TARGET zproj::refine)
+    add_executable(rpc_affine rpc_affine/main.cpp)
+    target_link_libraries(rpc_affine PRIVATE zproj zproj::refine)
+endif()
