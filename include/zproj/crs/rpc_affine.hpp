@@ -146,6 +146,10 @@ struct RpcAffineOptions {
     double affine_prior_weight = 0.0;
     // Levenberg-Marquardt iteration cap.
     int max_iterations = 100;
+    // Worker threads for the solve (Ceres parallelizes the Jacobian build
+    // and the Schur elimination across residual blocks). 0 = one thread per
+    // hardware thread.
+    int num_threads = 0;
     // Ceres minimizer progress to stdout.
     bool verbose = false;
 };

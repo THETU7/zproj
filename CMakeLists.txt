@@ -250,6 +250,9 @@ if(ZPROJ_BUILD_RPC_REFINE)
             zproj
         PRIVATE
             Ceres::ceres
+            # OpenMP parallelizes the match-triangulation initialization loop
+            # (the pragma is inert without it).
+            $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
     )
     zproj_enable_warnings(zproj_refine)
 endif()

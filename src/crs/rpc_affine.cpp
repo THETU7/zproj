@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -30,8 +32,13 @@ constexpr std::array<double, 6> kAffineIdentity{0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
 // Reprojection cost: projects one ground block (lon deg, lat deg, h m)
 // through one image's RPC and affine, and compares against the observed
 // pixel. Residuals in units of pixel_sigma. Forward evaluation only.
+//
+// Holds a POINTER to the shared RpcInfo instead of a copy: at 1e5 matches
+// there are 2e5 of these functors, and 80 copied coefficients each would
+// waste ~130 MB. The pointee (the caller's RpcInfo, passed by reference
+// into solve_rpc_affine) outlives the ceres::Problem.
 struct ReprojError {
-    ReprojError(const RpcInfo& info,
+    ReprojError(const RpcInfo* info,
                 double obs_col,
                 double obs_row,
                 double pixel_sigma)
@@ -46,7 +53,7 @@ struct ReprojError {
         T col;
         T row;
         detail::rpc_forward_point_core(
-            info_, lonlath[0], lonlath[1], lonlath[2], col, row);
+            *info_, lonlath[0], lonlath[1], lonlath[2], col, row);
         const T corr_col = affine[0] + (affine[1] * col) + (affine[2] * row);
         const T corr_row = affine[3] + (affine[4] * col) + (affine[5] * row);
         residuals[0] = (corr_col - T(obs_col_)) * T(inv_sigma_);
@@ -54,7 +61,7 @@ struct ReprojError {
         return true;
     }
 
-    RpcInfo info_;  // by value: each cost owns its coefficients
+    const RpcInfo* info_;
     double obs_col_;
     double obs_row_;
     double inv_sigma_;
@@ -65,7 +72,7 @@ ceres::CostFunction* MakeReprojCost(const RpcInfo& info,
                                     double obs_row,
                                     double pixel_sigma) {
     return new ceres::AutoDiffCostFunction<ReprojError, 2, 6, 3>(
-        new ReprojError(info, obs_col, obs_row, pixel_sigma));
+        new ReprojError(&info, obs_col, obs_row, pixel_sigma));
 }
 
 // Tikhonov prior on one affine block: residuals = w * (p - identity).
@@ -171,14 +178,28 @@ double ReprojectionRms(const RpcInfo& left,
 
 // Shared solve tail: runs Levenberg-Marquardt and, when Ceres returns a
 // usable solution, copies each affine block into its caller-facing RpcAffine.
+// `linear_solver_type` is chosen by the caller: DENSE_SCHUR for the two-view
+// problem (see below), DENSE_QR for the tiny GCP-only problem.
 RpcAffineReport SolveAndReport(
     ceres::Problem& problem,
     const RpcAffineOptions& options,
+    ceres::LinearSolverType linear_solver_type,
     const std::vector<std::pair<double*, RpcAffine*>>& affine_blocks) {
     ceres::Solver::Options solver_options;
-    solver_options.linear_solver_type = ceres::DENSE_QR;
+    // The two-view problem has classic bundle-adjustment sparsity: a handful
+    // of affine blocks ("cameras") and one 3-parameter ground block per
+    // match ("points"), every residual touching one of each. DENSE_QR
+    // factorizes the full (4N) x (12 + 3N) Jacobian -- O(N^3), minutes at
+    // N ~ 1e3 and impossible at 1e5. DENSE_SCHUR eliminates the ground
+    // blocks and solves the <= 12 x 12 reduced affine system instead: O(N)
+    // per iteration.
+    solver_options.linear_solver_type = linear_solver_type;
     solver_options.max_num_iterations =
         (options.max_iterations > 0) ? options.max_iterations : 1;
+    solver_options.num_threads =
+        (options.num_threads > 0)
+            ? options.num_threads
+            : std::max(1u, std::thread::hardware_concurrency());
     solver_options.minimizer_progress_to_stdout = options.verbose;
 
     ceres::Solver::Summary summary;
@@ -284,27 +305,39 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     const double h_low = left.height_off - span;
     const double h_high = left.height_off + span;
 
+    // Initialization is pure per-point math (four analytic inverses + a
+    // ray intersection per match); at 1e5 matches it would dominate the wall
+    // time, so it runs in parallel (OpenMP when linked, serial otherwise)
+    // into pre-sized arrays and is compacted serially below.
+    std::vector<std::array<double, 3>> ground_all(matches.size());
+    std::vector<unsigned char> init_ok(matches.size(), 0);
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(matches.size());
+         ++i) {
+        init_ok[i] = InitMatchGround(left,
+                                     left_model.inverse_init(),
+                                     left_affine,
+                                     right,
+                                     right_model.inverse_init(),
+                                     right_affine,
+                                     matches[static_cast<std::size_t>(i)],
+                                     h_low,
+                                     h_high,
+                                     ground_all[static_cast<std::size_t>(i)])
+                         ? 1
+                         : 0;
+    }
     std::vector<RpcMatch> used;
     used.reserve(matches.size());
     std::vector<std::array<double, 3>> ground;
     ground.reserve(matches.size());
-    for (const RpcMatch& m : matches) {
-        std::array<double, 3> lonlath;
-        if (!InitMatchGround(left,
-                             left_model.inverse_init(),
-                             left_affine,
-                             right,
-                             right_model.inverse_init(),
-                             right_affine,
-                             m,
-                             h_low,
-                             h_high,
-                             lonlath)) {
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+        if (!init_ok[i]) {
             ++report.num_matches_skipped;
             continue;
         }
-        ground.push_back(lonlath);
-        used.push_back(m);
+        ground.push_back(ground_all[i]);
+        used.push_back(matches[i]);
     }
     report.num_matches = static_cast<int>(used.size());
 
@@ -403,6 +436,7 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     RpcAffineReport solved =
         SolveAndReport(problem,
                        options,
+                       ceres::DENSE_SCHUR,
                        {{la.data(), &left_affine}, {ra.data(), &right_affine}});
     solved.num_matches = static_cast<int>(used.size());
     solved.num_matches_skipped = static_cast<int>(matches.size() - used.size());
@@ -476,8 +510,10 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& info,
     const double rms_before =
         std::sqrt(sum_before / (2.0 * static_cast<double>(gcps.size())));
 
-    RpcAffineReport solved =
-        SolveAndReport(problem, options, {{a.data(), &affine}});
+    // No free ground blocks here, so there is nothing for a Schur solver to
+    // eliminate; the plain dense QR is the right (and fastest) choice.
+    RpcAffineReport solved = SolveAndReport(
+        problem, options, ceres::DENSE_QR, {{a.data(), &affine}});
     solved.num_gcps = static_cast<int>(gcps.size());
     solved.rms_before_px = rms_before;
 
