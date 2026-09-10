@@ -408,6 +408,93 @@ TEST(SolveRpcAffineTwoView, NoisyMatchesPlusGcps) {
     EXPECT_LT(MaxParamDelta(out_r, truth_r), 1.0);
 }
 
+// Zero-mean constraint (no GCP, no prior): the common mode is pinned to
+// "zero correction" by construction, and the DIFFERENTIAL correction -- the
+// part matches actually observe -- must recover near the truth's
+// differential. Unconstrained, this noise realization drifts the common
+// mode by tens of pixels (see NoisyRmsAtNoiseLevel's comment).
+TEST(SolveRpcAffineTwoView, ZeroMeanConstrainsCommonMode) {
+    const RpcInfo left = MakeAffineNadirInfo();
+    const RpcInfo right = MakeAffineObliqueInfo();
+    const RpcAffine truth_l =
+        MakeAffine(3.5, 1.0003, -1e-4, -2.2, 8e-5, 0.9999);
+    const RpcAffine truth_r =
+        MakeAffine(-1.25, 0.9997, 1.5e-4, 4.0, -6e-5, 1.0002);
+    const double sigma = 0.3;
+    const Corrupted data =
+        MakeCorrupted(left, right, truth_l, truth_r, 200, sigma, 29);
+
+    RpcAffineOptions options;
+    options.pixel_sigma = sigma;
+    options.zero_mean_affines = true;
+    RpcAffine out_l;
+    RpcAffine out_r;
+    const RpcAffineReport report = solve_rpc_affine(
+        left, right, data.matches, {}, {}, out_l, out_r, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    EXPECT_LT(report.rms_after_px, 1.6 * sigma);
+
+    // The mean is the identity, exactly (the constraint's convention).
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_NEAR(
+            out_l.p[i] + out_r.p[i], 2.0 * RpcAffine::Identity().p[i], 1e-9);
+    }
+    // The differential recovers near the truth's differential, and the
+    // absolute corrections land at the zero-mean convention:
+    //   out = identity +/- (truth_l - truth_r) / 2. The height-vs-
+    // differential-translation direction stays only weakly observable
+    // (heights are free), so the budget is a few px -- pinning match
+    // heights tightens it (PinnedHeightsAnchorDatum).
+    for (int i = 0; i < 6; ++i) {
+        const double half_diff = 0.5 * (truth_l.p[i] - truth_r.p[i]);
+        EXPECT_NEAR(out_l.p[i] - RpcAffine::Identity().p[i], half_diff, 3.0)
+            << "left differential param " << i;
+        EXPECT_NEAR(out_r.p[i] - RpcAffine::Identity().p[i], -half_diff, 3.0)
+            << "right differential param " << i;
+    }
+}
+
+// DEM heights pinned per match (RpcMatch::height) plus the zero-mean
+// constraint: both gauge families are removed exactly, so a noisy, no-GCP
+// solve recovers the differential tightly -- the recommended configuration
+// when a coarse DEM is available.
+TEST(SolveRpcAffineTwoView, PinnedHeightsAnchorDatum) {
+    const RpcInfo left = MakeAffineNadirInfo();
+    const RpcInfo right = MakeAffineObliqueInfo();
+    const RpcAffine truth_l =
+        MakeAffine(3.5, 1.0003, -1e-4, -2.2, 8e-5, 0.9999);
+    const RpcAffine truth_r =
+        MakeAffine(-1.25, 0.9997, 1.5e-4, 4.0, -6e-5, 1.0002);
+    const double sigma = 0.3;
+    Corrupted data =
+        MakeCorrupted(left, right, truth_l, truth_r, 200, sigma, 31);
+
+    // Sample every match's height from the truth (a perfect DEM; a coarse
+    // one would add metre-scale height noise instead).
+    for (std::size_t i = 0; i < data.matches.size(); ++i) {
+        data.matches[i].height = data.pts[i].alt;
+    }
+
+    RpcAffineOptions options;
+    options.pixel_sigma = sigma;
+    options.zero_mean_affines = true;
+    RpcAffine out_l;
+    RpcAffine out_r;
+    const RpcAffineReport report = solve_rpc_affine(
+        left, right, data.matches, {}, {}, out_l, out_r, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    EXPECT_LT(report.rms_after_px, 1.6 * sigma);
+    for (int i = 0; i < 6; ++i) {
+        const double half_diff = 0.5 * (truth_l.p[i] - truth_r.p[i]);
+        EXPECT_NEAR(out_l.p[i] - RpcAffine::Identity().p[i], half_diff, 0.5)
+            << "left differential param " << i;
+        EXPECT_NEAR(out_r.p[i] - RpcAffine::Identity().p[i], -half_diff, 0.5)
+            << "right differential param " << i;
+    }
+}
+
 // The affine prior must keep a matches-only solve usable even when the
 // observations alone under-determine the affine parameters (LM gets a
 // Tikhonov-dominated but finite solution instead of being rejected).

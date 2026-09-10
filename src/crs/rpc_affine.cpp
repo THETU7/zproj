@@ -37,12 +37,18 @@ constexpr std::array<double, 6> kAffineIdentity{0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
 // there are 2e5 of these functors, and 80 copied coefficients each would
 // waste ~130 MB. The pointee (the caller's RpcInfo, passed by reference
 // into solve_rpc_affine) outlives the ceres::Problem.
+//
+// `mirror` implements the zero-mean constraint: the affine applied is
+// 2*identity - `affine`, i.e. the right image's block is parameterized as
+// the mirror of the left's, so the two affines' MEAN is exactly the
+// identity without any soft-constraint weight tuning.
 struct ReprojError {
     ReprojError(const RpcInfo* info,
                 double obs_col,
                 double obs_row,
-                double pixel_sigma)
-        : info_(info), obs_col_(obs_col), obs_row_(obs_row) {
+                double pixel_sigma,
+                bool mirror = false)
+        : info_(info), obs_col_(obs_col), obs_row_(obs_row), mirror_(mirror) {
         inv_sigma_ = 1.0 / ((pixel_sigma > 0.0) ? pixel_sigma : 1.0);
     }
 
@@ -54,8 +60,20 @@ struct ReprojError {
         T row;
         detail::rpc_forward_point_core(
             *info_, lonlath[0], lonlath[1], lonlath[2], col, row);
-        const T corr_col = affine[0] + (affine[1] * col) + (affine[2] * row);
-        const T corr_row = affine[3] + (affine[4] * col) + (affine[5] * row);
+        const T e0 =
+            mirror_ ? (T(2.0 * kAffineIdentity[0]) - affine[0]) : affine[0];
+        const T e1 =
+            mirror_ ? (T(2.0 * kAffineIdentity[1]) - affine[1]) : affine[1];
+        const T e2 =
+            mirror_ ? (T(2.0 * kAffineIdentity[2]) - affine[2]) : affine[2];
+        const T f0 =
+            mirror_ ? (T(2.0 * kAffineIdentity[3]) - affine[3]) : affine[3];
+        const T f1 =
+            mirror_ ? (T(2.0 * kAffineIdentity[4]) - affine[4]) : affine[4];
+        const T f2 =
+            mirror_ ? (T(2.0 * kAffineIdentity[5]) - affine[5]) : affine[5];
+        const T corr_col = e0 + (e1 * col) + (e2 * row);
+        const T corr_row = f0 + (f1 * col) + (f2 * row);
         residuals[0] = (corr_col - T(obs_col_)) * T(inv_sigma_);
         residuals[1] = (corr_row - T(obs_row_)) * T(inv_sigma_);
         return true;
@@ -65,14 +83,16 @@ struct ReprojError {
     double obs_col_;
     double obs_row_;
     double inv_sigma_;
+    bool mirror_;
 };
 
 ceres::CostFunction* MakeReprojCost(const RpcInfo& info,
                                     double obs_col,
                                     double obs_row,
-                                    double pixel_sigma) {
+                                    double pixel_sigma,
+                                    bool mirror = false) {
     return new ceres::AutoDiffCostFunction<ReprojError, 2, 6, 3>(
-        new ReprojError(&info, obs_col, obs_row, pixel_sigma));
+        new ReprojError(&info, obs_col, obs_row, pixel_sigma, mirror));
 }
 
 // Tikhonov prior on one affine block: residuals = w * (p - identity).
@@ -104,6 +124,16 @@ std::unique_ptr<ceres::Manifold> MakeAffineManifold(RpcAffineDoF dof) {
             return nullptr;
     }
     return nullptr;
+}
+
+// The mirrored affine (2*identity - p), used for the right image when
+// zero_mean_affines is on.
+std::array<double, 6> MirrorAffine(const std::array<double, 6>& p) {
+    std::array<double, 6> out{};
+    for (int i = 0; i < 6; ++i) {
+        out[i] = 2.0 * kAffineIdentity[i] - p[i];
+    }
+    return out;
 }
 
 // Loss function factory: Ceres' Problem takes ownership of each residual
@@ -279,10 +309,11 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     // Constraint accounting: a match contributes 4 residuals but 3 new
     // unknowns (its ground block), net 1; each GCP observation contributes 2
     // residuals against a constant ground block, net 2. Require the net
-    // count to reach the floated affine parameters (both images) -- unless a
-    // prior is active, whose Tikhonov terms make the normal equations full
-    // rank regardless.
-    const int n_affine_params = 2 * static_cast<int>(options.dof);
+    // count to reach the floated affine parameters -- unless a prior is
+    // active, whose Tikhonov terms make the normal equations full rank
+    // regardless. With zero_mean_affines one block drives both images.
+    const int n_affine_params =
+        (options.zero_mean_affines ? 1 : 2) * static_cast<int>(options.dof);
     const bool has_prior = options.affine_prior_weight > 0.0;
     const auto UnderDetermined = [&](int n_matches) {
         return (static_cast<double>(n_matches) + 2.0 * num_gcps) <
@@ -336,6 +367,11 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
             ++report.num_matches_skipped;
             continue;
         }
+        // A finite match height (e.g. sampled from a DEM) pins the ground
+        // block's height; the free-triangulation value only seeds lon/lat.
+        if (std::isfinite(matches[i].height)) {
+            ground_all[i][2] = matches[i].height;
+        }
         ground.push_back(ground_all[i]);
         used.push_back(matches[i]);
     }
@@ -357,21 +393,33 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     const std::vector<std::array<double, 3>> ground_init = ground;
 
     // Problem assembly. The affine blocks live in local storage so a failed
-    // solve leaves the caller's affines untouched.
+    // solve leaves the caller's affines untouched. With zero_mean_affines a
+    // single block drives both images: the right image's residuals evaluate
+    // the mirrored affine (2*identity - la), an exact mean-to-identity
+    // constraint.
     std::array<double, 6> la = left_affine.p;
     std::array<double, 6> ra = right_affine.p;
+    const bool zero_mean = options.zero_mean_affines;
+    double* right_block = zero_mean ? la.data() : ra.data();
     ceres::Problem problem;
     problem.AddParameterBlock(la.data(), 6);
-    problem.AddParameterBlock(ra.data(), 6);
-    if (auto manifold = MakeAffineManifold(options.dof)) {
-        problem.SetManifold(la.data(), manifold.release());
+    if (!zero_mean) {
+        problem.AddParameterBlock(ra.data(), 6);
+        if (auto manifold = MakeAffineManifold(options.dof)) {
+            problem.SetManifold(ra.data(), manifold.release());
+        }
     }
     if (auto manifold = MakeAffineManifold(options.dof)) {
-        problem.SetManifold(ra.data(), manifold.release());
+        problem.SetManifold(la.data(), manifold.release());
     }
 
     for (std::size_t i = 0; i < used.size(); ++i) {
         problem.AddParameterBlock(ground[i].data(), 3);
+        if (std::isfinite(used[i].height)) {
+            // DEM-anchored match: hold the height constant (index 2).
+            problem.SetManifold(ground[i].data(),
+                                new ceres::SubsetManifold(3, {2}));
+        }
         problem.AddResidualBlock(
             MakeReprojCost(
                 left, used[i].left_col, used[i].left_row, options.pixel_sigma),
@@ -381,9 +429,10 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
         problem.AddResidualBlock(MakeReprojCost(right,
                                                 used[i].right_col,
                                                 used[i].right_row,
-                                                options.pixel_sigma),
+                                                options.pixel_sigma,
+                                                zero_mean),
                                  NewLoss(options),
-                                 ra.data(),
+                                 right_block,
                                  ground[i].data());
     }
 
@@ -391,34 +440,47 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     // the measurement). Blocks must stay alive for the problem's lifetime.
     std::vector<std::array<double, 3>> gcp_ground;
     gcp_ground.reserve(left_gcps.size() + right_gcps.size());
-    const auto AddGcpBlocks =
-        [&](const RpcInfo& info, const std::vector<RpcGcp>& gcps, double* aff) {
-            for (const RpcGcp& g : gcps) {
-                gcp_ground.push_back({g.lon, g.lat, g.height});
-                problem.AddParameterBlock(gcp_ground.back().data(), 3);
-                problem.SetParameterBlockConstant(gcp_ground.back().data());
-                problem.AddResidualBlock(
-                    MakeReprojCost(info, g.col, g.row, options.pixel_sigma),
-                    NewLoss(options),
-                    aff,
-                    gcp_ground.back().data());
-            }
-        };
-    AddGcpBlocks(left, left_gcps, la.data());
-    AddGcpBlocks(right, right_gcps, ra.data());
+    const auto AddGcpBlocks = [&](const RpcInfo& info,
+                                  const std::vector<RpcGcp>& gcps,
+                                  double* aff,
+                                  bool mirror) {
+        for (const RpcGcp& g : gcps) {
+            gcp_ground.push_back({g.lon, g.lat, g.height});
+            problem.AddParameterBlock(gcp_ground.back().data(), 3);
+            problem.SetParameterBlockConstant(gcp_ground.back().data());
+            problem.AddResidualBlock(
+                MakeReprojCost(info, g.col, g.row, options.pixel_sigma, mirror),
+                NewLoss(options),
+                aff,
+                gcp_ground.back().data());
+        }
+    };
+    AddGcpBlocks(left, left_gcps, la.data(), false);
+    AddGcpBlocks(right, right_gcps, right_block, zero_mean);
 
     if (options.affine_prior_weight > 0.0) {
         const double w = options.affine_prior_weight;
+        // Under zero_mean this regularizes the differential parameters only
+        // (there is just the one block).
         problem.AddResidualBlock(
             new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
                 new AffinePrior(w)),
             nullptr,
             la.data());
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
-                new AffinePrior(w)),
-            nullptr,
-            ra.data());
+        if (!zero_mean) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
+                    new AffinePrior(w)),
+                nullptr,
+                ra.data());
+        }
+    }
+
+    // Under zero_mean the effective right affine is the mirror of la (the
+    // caller's initial right affine is overruled by the constraint); keep ra
+    // in sync so the RMS loops and the write-back agree on one truth.
+    if (zero_mean) {
+        ra = MirrorAffine(la);
     }
 
     // The "before" RMS uses the triangulated ground blocks and the initial
@@ -433,11 +495,19 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
                                               la.data(),
                                               ra.data());
 
+    std::vector<std::pair<double*, RpcAffine*>> affine_blocks{
+        {la.data(), &left_affine}};
+    if (!zero_mean) {
+        affine_blocks.emplace_back(ra.data(), &right_affine);
+    }
     RpcAffineReport solved =
-        SolveAndReport(problem,
-                       options,
-                       ceres::DENSE_SCHUR,
-                       {{la.data(), &left_affine}, {ra.data(), &right_affine}});
+        SolveAndReport(problem, options, ceres::DENSE_SCHUR, affine_blocks);
+    if (zero_mean) {
+        ra = MirrorAffine(la);
+        if (solved.ok) {
+            right_affine.p = ra;
+        }
+    }
     solved.num_matches = static_cast<int>(used.size());
     solved.num_matches_skipped = static_cast<int>(matches.size() - used.size());
     solved.num_gcps = num_gcps;

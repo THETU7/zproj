@@ -36,7 +36,11 @@
 // infinite-dimensional family (per-point motion along its ray fibers). Real
 // RPC products couple height into both images through the position-dependent
 // cross terms (LH, PH, ...), which breaks these directions; GCPs or a small
-// affine_prior_weight anchor the solution regardless of geometry.
+// affine_prior_weight anchor the solution regardless of geometry. For
+// matches-only solves, zero_mean_affines removes the common-mode gauge
+// exactly (the classical relative adjustment), and per-match DEM heights
+// (RpcMatch::height) pin the height direction -- together they make a
+// no-GCP solve drift-free.
 //
 // The solver lives in the zproj_refine library (Ceres, CPU): a per-scene
 // problem of 2 x <=6 affine parameters plus 3 per match, solved once. The
@@ -45,6 +49,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -118,6 +123,12 @@ struct RpcMatch {
     double left_row = 0.0;
     double right_col = 0.0;
     double right_row = 0.0;
+    // Optional height above the ellipsoid [m]. NaN (the default) leaves the
+    // match's ground height free; a finite value pins it -- e.g. sampled
+    // from a coarse DEM -- which removes the height-vs-translation gauge
+    // without any GCP (see RpcAffineOptions::zero_mean_affines for the
+    // companion constraint on the common mode).
+    double height = std::numeric_limits<double>::quiet_NaN();
 };
 
 // One ground control point: known ground position plus its measured pixel.
@@ -142,8 +153,22 @@ struct RpcAffineOptions {
     // Recommended for noisy matches-only solves: without an anchor, the
     // weakly observable height-vs-translation gauge lets Levenberg-Marquardt
     // drift far while barely changing the cost (values ~1e-2..1 work well;
-    // GCPs anchor the same direction exactly).
+    // GCPs anchor the same direction exactly). With zero_mean_affines the
+    // prior acts on the differential parameters only.
     double affine_prior_weight = 0.0;
+    // Two-view only: constrain the two affines' MEAN to the identity (an
+    // exact constraint, implemented by parameterizing the right image's
+    // affine as the mirror of the left's). This is the classical relative
+    // adjustment: without ground reference, matches determine only the
+    // DIFFERENTIAL correction between the images, while the common mode
+    // (uniform ground shift absorbed by both images' translations) is an
+    // exact gauge that otherwise soaks up noise as drift. Pinning the mean
+    // to "zero correction" removes it; the returned affines are then a
+    // convention (differential split symmetrically), not absolute
+    // corrections. Combine with per-match DEM heights (RpcMatch::height)
+    // to also pin the weakly observable height direction, or with GCPs --
+    // which anchor both exactly and make this flag unnecessary.
+    bool zero_mean_affines = false;
     // Levenberg-Marquardt iteration cap.
     int max_iterations = 100;
     // Worker threads for the solve (Ceres parallelizes the Jacobian build
