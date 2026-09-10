@@ -63,10 +63,13 @@ using zproj::crs::wgs84_to_ecef;
 constexpr double kDeg2Rad = std::numbers::pi / 180.0;
 constexpr double kRad2Deg = 180.0 / std::numbers::pi;
 
-// Deterministic pseudo-random points with a fixed seed.
+// Deterministic pseudo-random points with a fixed seed, spanning the full
+// globe (the polar caps are part of the GDAL cross-check below; exactly
+// +-90 deg, where longitude is undefined, is excluded by the half-open
+// interval).
 std::vector<Geodetic> MakePoints(std::size_t n) {
     std::mt19937 rng(42);
-    std::uniform_real_distribution<double> lat_deg(-89.0, 89.0);
+    std::uniform_real_distribution<double> lat_deg(-90.0, 90.0);
     std::uniform_real_distribution<double> lon_deg(-180.0, 180.0);
     std::uniform_real_distribution<double> height(0.0, 1000.0);
 

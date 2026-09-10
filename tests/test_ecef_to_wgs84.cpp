@@ -68,22 +68,19 @@ Geodetic ReferenceGeodetic(const Ecef& e) {
 
     const double sin_lat = std::sin(lat);
     const double cos_lat = std::cos(lat);
-    const double n = a / std::sqrt(1.0 - es * sin_lat * sin_lat);
-
-    double h = 0.0;
-    if (std::fabs(cos_lat) < 1e-3) {
-        h = e.z() - (e.z() > 0.0 ? b : -b);
-    } else {
-        h = p / cos_lat - n;
-    }
+    // Surface-normal projection: h = p cos(lat) + z sin(lat) - a W. This is
+    // accurate through the polar cap, unlike p / cos(lat) - N.
+    const double w = std::sqrt(1.0 - es * sin_lat * sin_lat);
+    const double h = p * cos_lat + e.z() * sin_lat - a * w;
     // x = lon, y = lat, z = h.
     return Geodetic{lon, lat, h};
 }
 
-// Deterministic pseudo-random geodetic points with a fixed seed.
+// Deterministic pseudo-random geodetic points with a fixed seed, spanning
+// the full globe including the polar caps.
 std::vector<Geodetic> MakePoints(std::size_t n) {
     std::mt19937 rng(42);
-    std::uniform_real_distribution<double> lat_deg(-89.0, 89.0);
+    std::uniform_real_distribution<double> lat_deg(-90.0, 90.0);
     std::uniform_real_distribution<double> lon_deg(-180.0, 180.0);
     std::uniform_real_distribution<double> height(0.0, 1000.0);
 
@@ -95,11 +92,34 @@ std::vector<Geodetic> MakePoints(std::size_t n) {
     return pts;
 }
 
-// Deterministic pseudo-random ECEF points with a fixed seed (heights up to
-// 10 km, so the round-trip stresses the inverse beyond surface points).
+// Deterministic pseudo-random geodetic points concentrated in the polar
+// band, |lat| in [89.9, 90) deg. This is where the retired
+// |cos(lat)| < 1e-3 pole guard (triggering poleward of ~89.9427 deg)
+// produced height errors of metres at h = 0 and up to ~2h for elevated
+// points. Exactly +-90 deg is excluded because longitude is undefined on
+// the rotation axis.
+std::vector<Geodetic> MakePolarPoints(std::size_t n) {
+    std::mt19937 rng(99);
+    std::uniform_real_distribution<double> lon_deg(-180.0, 180.0);
+    std::uniform_real_distribution<double> lat_abs_deg(89.9, 90.0);
+    std::uniform_real_distribution<double> height(-1000.0, 10000.0);
+
+    std::vector<Geodetic> pts(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double lat_deg =
+            (i % 2 == 0) ? lat_abs_deg(rng) : -lat_abs_deg(rng);
+        pts[i] =
+            Geodetic(lon_deg(rng) * kDeg2Rad, lat_deg * kDeg2Rad, height(rng));
+    }
+    return pts;
+}
+
+// Deterministic pseudo-random ECEF points with a fixed seed over the full
+// globe (heights up to 10 km, so the round-trip stresses the inverse
+// beyond surface points).
 std::vector<Ecef> MakeEcef(std::size_t n) {
     std::mt19937 rng(7);
-    std::uniform_real_distribution<double> lat_deg(-89.0, 89.0);
+    std::uniform_real_distribution<double> lat_deg(-90.0, 90.0);
     std::uniform_real_distribution<double> lon_deg(-180.0, 180.0);
     std::uniform_real_distribution<double> height(-1000.0, 10000.0);
 
@@ -154,7 +174,8 @@ bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
 
 TEST(EcefToWgs84Cpu, KnownPoints) {
     // (a, 0, 0) -> origin; (0, 0, +/-b) -> poles; (0, a, 0) -> lon=90 on the
-    // equator; pole heights exercise the |cos(lat)| < 1e-3 guard.
+    // equator; elevated poles are exactly on the rotation axis, where the
+    // longitude is degenerate (atan2(0, 0) = 0).
     const double a = wgs84::kSemiMajorAxis;
     const double b = wgs84::kSemiMinorAxis;
     std::vector<Ecef> pts{
@@ -173,7 +194,10 @@ TEST(EcefToWgs84Cpu, KnownPoints) {
     ASSERT_TRUE(out.is_cpu());
     ASSERT_EQ(out.size(0), 6);
     const double* p = out.data_ptr<double>();
-    // Output is (lon, lat, h) per point.
+    // Output is (lon, lat, h) per point. Point 5 is 1000 m above the
+    // ellipsoid: below the south pole the outward surface normal points
+    // along -Z, so h = +1000 m (the GDAL/PROJ reference agrees; the retired
+    // Z-axis fallback returned the wrong sign, -1000 m).
     EXPECT_NEAR(p[0], 0.0, kTolAng);          // point 0: lon
     EXPECT_NEAR(p[1], 0.0, kTolAng);          //          lat
     EXPECT_NEAR(p[2], 0.0, kTolH);            //          h
@@ -191,7 +215,7 @@ TEST(EcefToWgs84Cpu, KnownPoints) {
     EXPECT_NEAR(p[14], 1000.0, kTolH);        //          h
     EXPECT_NEAR(p[15], 0.0, kTolAng);         // point 5: lon
     EXPECT_NEAR(p[16], -kPi / 2.0, kTolAng);  //          lat
-    EXPECT_NEAR(p[17], -1000.0, kTolH);       //          h
+    EXPECT_NEAR(p[17], 1000.0, kTolH);        //          h
 }
 
 TEST(EcefToWgs84Cpu, BatchMatchesReference) {
@@ -225,6 +249,71 @@ TEST(EcefToWgs84Cpu, RoundTripsGeodeticPoints) {
     constexpr int64_t kNumPoints = 4096;
     std::vector<Geodetic> pts =
         MakePoints(static_cast<std::size_t>(kNumPoints));
+    std::vector<Ecef> ecef;
+    ecef.reserve(pts.size());
+    for (const Geodetic& g : pts) {
+        ecef.push_back(to_ecef(g));
+    }
+
+    zt::Tensor in = EcefTensor(ecef);
+    zt::Tensor out;
+    ecef_to_wgs84(in, out);
+
+    ASSERT_TRUE(out.is_cpu());
+    const double* p = out.data_ptr<double>();
+    for (int64_t i = 0; i < kNumPoints; ++i) {
+        const Geodetic& g = pts[static_cast<std::size_t>(i)];
+        EXPECT_NEAR(p[3 * i + 0], g.x(), kTolAng) << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], g.y(), kTolAng) << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], g.z(), kTolH) << "point " << i << " h";
+    }
+}
+
+// ============================ polar band ================================
+//
+// The |cos(lat)| < 1e-3 Z-axis height fallback retired from from_ecef was
+// only exact for points on the rotation axis; off-axis points in its
+// trigger band (|lat| > ~89.9427 deg, up to ~6.4 km from the axis) got
+// heights wrong by metres at h = 0 and by ~2h for elevated points (e.g.
+// -997.56 m instead of 1000 m at lat = -89.95 deg).
+
+TEST(EcefToWgs84Cpu, PolarBandKnownPoints) {
+    const std::vector<Geodetic> pts{
+        Geodetic{30.0 * kDeg2Rad, -89.95 * kDeg2Rad, 0.0},
+        Geodetic{30.0 * kDeg2Rad, -89.95 * kDeg2Rad, 1000.0},
+        Geodetic{-120.0 * kDeg2Rad, -89.99 * kDeg2Rad, 10000.0},
+        Geodetic{45.0 * kDeg2Rad, 89.95 * kDeg2Rad, 1000.0},
+        Geodetic{45.0 * kDeg2Rad, 89.999 * kDeg2Rad, 0.0},
+    };
+    std::vector<Ecef> ecef;
+    ecef.reserve(pts.size());
+    for (const Geodetic& g : pts) {
+        ecef.push_back(to_ecef(g));
+    }
+
+    zt::Tensor in = EcefTensor(ecef);
+    zt::Tensor out;
+    ecef_to_wgs84(in, out);
+
+    ASSERT_TRUE(out.is_cpu());
+    ASSERT_EQ(out.size(0), static_cast<int64_t>(pts.size()));
+    const double* p = out.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(p[3 * i + 0], pts[i].x(), kTolAng)
+            << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], pts[i].y(), kTolAng)
+            << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], pts[i].z(), kTolH) << "point " << i << " h";
+    }
+}
+
+TEST(EcefToWgs84Cpu, PolarBandRandomRoundTrips) {
+    // Random points concentrated in the polar band must round-trip: the
+    // forward transform defines the ground truth, so the inverse is checked
+    // against the generating geodetic coordinates.
+    constexpr int64_t kNumPoints = 4096;
+    std::vector<Geodetic> pts =
+        MakePolarPoints(static_cast<std::size_t>(kNumPoints));
     std::vector<Ecef> ecef;
     ecef.reserve(pts.size());
     for (const Geodetic& g : pts) {
@@ -385,6 +474,31 @@ TEST_F(EcefToWgs84CudaTest, RoundTripsGeodeticPoints) {
     constexpr int64_t kNumPoints = 4096;
     std::vector<Geodetic> pts =
         MakePoints(static_cast<std::size_t>(kNumPoints));
+    std::vector<Ecef> ecef;
+    ecef.reserve(pts.size());
+    for (const Geodetic& g : pts) {
+        ecef.push_back(to_ecef(g));
+    }
+
+    zt::Tensor in = EcefTensor(ecef).cuda();
+    zt::Tensor out;
+    ecef_to_wgs84(in, out);
+
+    ASSERT_TRUE(out.is_cuda());
+    const zt::Tensor out_cpu = out.cpu();
+    const double* p = out_cpu.data_ptr<double>();
+    for (int64_t i = 0; i < kNumPoints; ++i) {
+        const Geodetic& g = pts[static_cast<std::size_t>(i)];
+        EXPECT_NEAR(p[3 * i + 0], g.x(), kTolAng) << "point " << i << " lon";
+        EXPECT_NEAR(p[3 * i + 1], g.y(), kTolAng) << "point " << i << " lat";
+        EXPECT_NEAR(p[3 * i + 2], g.z(), kTolH) << "point " << i << " h";
+    }
+}
+
+TEST_F(EcefToWgs84CudaTest, PolarBandRandomRoundTrips) {
+    constexpr int64_t kNumPoints = 4096;
+    std::vector<Geodetic> pts =
+        MakePolarPoints(static_cast<std::size_t>(kNumPoints));
     std::vector<Ecef> ecef;
     ecef.reserve(pts.size());
     for (const Geodetic& g : pts) {

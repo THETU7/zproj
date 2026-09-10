@@ -74,7 +74,9 @@ ZT_HOST_DEVICE inline Ecef to_ecef(const Geodetic& g) noexcept {
 // geographical coordinates", Survey Review 23(181), 1976) -- the same
 // algorithm PROJ's `cart` operation uses for the inverse, so results match the
 // GDAL/PROJ reference to round-off. theta is a first approximation of the
-// reduced latitude; the atan2() correction yields the geodetic latitude.
+// reduced latitude; the atan2() correction yields the geodetic latitude. The
+// height is computed by surface-normal projection, which stays accurate
+// through the polar cap (see the comment at the height formula below).
 ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
     using namespace wgs84;
     // Perpendicular distance from the point to the Z axis (HM eq. 5-28).
@@ -113,17 +115,17 @@ ZT_HOST_DEVICE inline Geodetic from_ecef(const Ecef& e) noexcept {
     const double sin_lat = sin(lat);
     const double cos_lat = cos(lat);
 #endif  // __CUDACC__
-    const double n =
-        kSemiMajorAxis / sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
-
-    double h = 0.0;
-    if (fabs(cos_lat) < 1e-3) {
-        // Poleward of ~89.94 deg, p / cos(lat) would divide by ~0, so compute
-        // the height along the Z axis instead (same guard as PROJ's inverse).
-        h = e.z() - (e.z() > 0.0 ? b : -b);
-    } else {
-        h = p / cos_lat - n;
-    }
+    // Height as the signed distance along the surface normal: since
+    // p = (N + h) cos(lat) and z = (N (1 - e^2) + h) sin(lat), the projection
+    // of the point onto the normal direction reduces to
+    //   p cos(lat) + z sin(lat) = a W + h,   W = sqrt(1 - e^2 sin^2 lat),
+    // so h = p cos(lat) + z sin(lat) - a W. This form has no division (the
+    // poles need no special case, unlike p / cos(lat) - N) and its partial
+    // derivative w.r.t. lat is zero, so the height does not inherit latitude
+    // error amplified by tan(lat) near the poles. It matches the GDAL/PROJ
+    // reference to round-off over the full globe, polar cap included.
+    const double w = sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
+    const double h = p * cos_lat + e.z() * sin_lat - kSemiMajorAxis * w;
     // x = lon, y = lat, z = h.
     return Geodetic{lon, lat, h};
 }
