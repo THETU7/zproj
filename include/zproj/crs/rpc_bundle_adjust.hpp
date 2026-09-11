@@ -60,6 +60,7 @@
 // million-point blocks and solves the <= 6V x 6V camera system.
 #pragma once
 
+#include <array>
 #include <limits>
 #include <string>
 #include <vector>
@@ -150,5 +151,100 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
                                     const std::vector<RpcBaPoint>& points,
                                     std::vector<RpcAffine>& affines,
                                     const RpcBaOptions& options = {});
+
+// ========================= banded variant =================================
+//
+// solve_rpc_bundle_adjust_banded(): one GLOBAL affine per scene plus a
+// per-band TRANSLATION shift -- the camera model for row-dependent
+// systematic error (the wave/jitter pattern: error large at the scene's
+// top, middle and bottom, small at the quarter rows). The scene affine
+// absorbs the scene-wide scale/shear/rotation bias (constrained by ALL of
+// the scene's observations); the band shifts absorb the wave as a
+// piecewise-constant or piecewise-linear function of the pixel row:
+//
+//     col' = (e0 + dx_band) + e1*col + e2*row
+//     row' = (f0 + dy_band) + f1*col + f2*row
+//
+// Parameterization internals (exact, no soft constraints):
+//   * The band shifts are ZERO-MEAN within each scene: the band listed
+//     last for a scene derives its shift from the others. This removes the
+//     exact degeneracy between the scene affine's translation and the mean
+//     of its band shifts, and means the effective per-band translation is
+//     scene translation + zero-mean wave. A scene with a single band has
+//     its shift pinned to zero (no wave structure to resolve).
+//   * zero_mean_affines, when set, generalizes to "the MEAN of the scene
+//     affines is the identity" (the last scene's affine is derived from the
+//     others; the caller's initial affine for it is overruled).
+//
+// Observability caveat (stronger than the plain solver's): with matches
+// only, every row region carries its own horizontal common mode -- the
+// bands covering those rows in ALL scenes can drift together, the ground
+// blocks absorb it, and zero-mean does not touch it. Anchor with GCPs
+// spread across the rows, or with band_shift_prior_weight (a Tikhonov
+// prior that pins the drift to "no correction relative to the scene
+// affine"); per-point DEM heights pin the height direction as usual.
+//
+// Measures reference SCENES (RpcBaMeasure::view indexes `scenes`, not
+// bands): a measure's band follows from its pixel row, so ordinary
+// multi-scene match networks plug in unchanged. Rows outside a scene's
+// band range clamp to the nearest band (constant extension under
+// RpcBaBandBasis::Linear).
+//
+// Approximation power: fitting a full-period wave of amplitude A with N
+// bands leaves ~A*pi^2/(2N^2) px (Linear basis) -- N=12, A=5 px gives
+// ~0.17 px. The corrected composite (RPC + scene affine + band shift)
+// should stay beside the RPC as separate correction layers; folding it
+// back into refitted RPC coefficients re-smears the wave (a cubic
+// rational polynomial cannot carry it).
+
+// How a measure's pixel row blends the band shifts of its scene.
+enum class RpcBaBandBasis {
+    // One-hot: the band whose [row_lo, row_hi) contains the measure's row
+    // takes the full shift (nearest band outside the covered range).
+    // Piecewise-constant correction; jumps at band boundaries of the same
+    // order as the within-band approximation error.
+    Constant,
+    // Tent: linear interpolation between the two nearest band centers
+    // (constant extension outside them). Piecewise-LINEAR, C0-continuous
+    // correction -- no seams. The default.
+    Linear,
+};
+
+// One row band [row_lo, row_hi) of one scene. Bands of a scene need not
+// tile exactly (gaps/overlaps are tolerated; assignment falls back to the
+// nearest center), but a sensible tiling of the row range is the intended
+// use.
+struct RpcBaBand {
+    int scene = 0;
+    double row_lo = 0.0;
+    double row_hi = 0.0;
+};
+
+// Banded options: the plain RpcBaOptions knobs plus the band-specific
+// ones. `dof` restricts the scene affines only (the band shifts are always
+// 2-parameter translations).
+struct RpcBaBandedOptions : RpcBaOptions {
+    // Shift blending across rows (see RpcBaBandBasis).
+    RpcBaBandBasis basis = RpcBaBandBasis::Linear;
+    // Tikhonov weight pulling each free band shift towards zero (i.e.
+    // towards the scene affine alone). 0 disables. Recommended for
+    // matches-only banded solves (see the observability caveat above) and
+    // for bands weakly covered by matches or GCPs.
+    double band_shift_prior_weight = 0.0;
+};
+
+// Banded solve: float every scene's global affine plus its bands'
+// translation shifts against the control network. `scene_affines` sizes to
+// scenes and `band_shifts` (col, row px) to bands; both initialize their
+// blocks and are overwritten only on success. On success the effective
+// correction of a pixel at row r in scene s is the scene affine plus the
+// scene's blended band shift at r.
+RpcBaReport solve_rpc_bundle_adjust_banded(
+    const std::vector<RpcInfo>& scenes,
+    const std::vector<RpcBaBand>& bands,
+    const std::vector<RpcBaPoint>& points,
+    std::vector<RpcAffine>& scene_affines,
+    std::vector<std::array<double, 2>>& band_shifts,
+    const RpcBaBandedOptions& options = {});
 
 }  // namespace zproj::crs

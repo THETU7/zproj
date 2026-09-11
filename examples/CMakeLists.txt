@@ -52,4 +52,12 @@ if(TARGET zproj::refine)
     # ground accuracy of N-view triangulation before/after the correction.
     add_executable(rpc_bundle_adjust rpc_bundle_adjust/main.cpp)
     target_link_libraries(rpc_bundle_adjust PRIVATE zproj zproj::refine)
+
+    # Banded bundle adjustment demo (Ceres): the wave-absorbing camera model
+    # (one global affine per scene + tent-basis band shifts) recovering a
+    # known affine + single-period row-wave corruption; reports the
+    # residual-vs-row profile (the W shape) flattening and the ground
+    # accuracy of corrected vs raw triangulation.
+    add_executable(rpc_bundle_adjust_banded rpc_bundle_adjust_banded/main.cpp)
+    target_link_libraries(rpc_bundle_adjust_banded PRIVATE zproj zproj::refine)
 endif()
