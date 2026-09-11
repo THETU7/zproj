@@ -167,13 +167,23 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 //     col' = (e0 + dx_band) + e1*col + e2*row
 //     row' = (f0 + dy_band) + f1*col + f2*row
 //
+// The corrections travel as RpcAffineBanded values (rpc_affine.hpp) -- one
+// object per scene, in and out: pass identity affines with zero-shift
+// bands for a fresh solve (RpcAffineBanded::MakeUniform), or previous
+// solutions to warm-start. The returned objects are the complete
+// downstream correction (Apply / EffectiveAffine); nothing else needs
+// assembling. Each scene blends its bands per ITS object's basis, so
+// Linear and Constant scenes may be mixed; a scene with NO bands is a
+// plain per-view affine scene and may be mixed with banded ones.
+//
 // Parameterization internals (exact, no soft constraints):
-//   * The band shifts are ZERO-MEAN within each scene: the band listed
-//     last for a scene derives its shift from the others. This removes the
-//     exact degeneracy between the scene affine's translation and the mean
-//     of its band shifts, and means the effective per-band translation is
-//     scene translation + zero-mean wave. A scene with a single band has
-//     its shift pinned to zero (no wave structure to resolve).
+//   * The band shifts are ZERO-MEAN within each scene: each scene's
+//     highest-center band derives its shift from the others. This removes
+//     the exact degeneracy between the scene affine's translation and the
+//     mean of its band shifts, and means the effective per-band
+//     translation is scene translation + zero-mean wave. A scene with a
+//     single band has its shift pinned to zero (no wave structure to
+//     resolve).
 //   * zero_mean_affines, when set, generalizes to "the MEAN of the scene
 //     affines is the identity" (the last scene's affine is derived from the
 //     others; the caller's initial affine for it is overruled).
@@ -198,28 +208,12 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 // should stay beside the RPC as separate correction layers; folding it
 // back into refitted RPC coefficients re-smears the wave (a cubic
 // rational polynomial cannot carry it).
-//
-// Consumption: assemble each scene's correction into an RpcAffineBanded
-// (rpc_affine.hpp) with MakeRpcAffineBanded below -- one value that
-// downstream code applies to pixels directly.
-
-// One row band [row_lo, row_hi) of one scene. Bands of a scene need not
-// tile exactly (gaps/overlaps are tolerated; assignment falls back to the
-// nearest center), but a sensible tiling of the row range is the intended
-// use.
-struct RpcBaBand {
-    int scene = 0;
-    double row_lo = 0.0;
-    double row_hi = 0.0;
-};
 
 // Banded options: the plain RpcBaOptions knobs plus the band-specific
 // ones. `dof` restricts the scene affines only (the band shifts are always
-// 2-parameter translations).
+// 2-parameter translations); the blending basis lives on each scene's
+// RpcAffineBanded object, not here.
 struct RpcBaBandedOptions : RpcBaOptions {
-    // Shift blending across rows (see RpcAffineBandBasis in rpc_affine.hpp;
-    // the solver's internal evaluation matches RpcAffineBanded exactly).
-    RpcAffineBandBasis basis = RpcAffineBandBasis::Linear;
     // Tikhonov weight pulling each free band shift towards zero (i.e.
     // towards the scene affine alone). 0 disables. Recommended for
     // matches-only banded solves (see the observability caveat above) and
@@ -228,43 +222,14 @@ struct RpcBaBandedOptions : RpcBaOptions {
 };
 
 // Banded solve: float every scene's global affine plus its bands'
-// translation shifts against the control network. `scene_affines` sizes to
-// scenes and `band_shifts` (col, row px) to bands; both initialize their
-// blocks and are overwritten only on success. On success the effective
-// correction of a pixel at row r in scene s is the scene affine plus the
-// scene's blended band shift at r.
+// translation shifts against the control network. `corrected` carries one
+// RpcAffineBanded per scene (parallel to `scenes`): its affine and band
+// shifts are the initial guess and are overwritten only on success (the
+// band structure -- row ranges, count, basis -- is taken as given).
 RpcBaReport solve_rpc_bundle_adjust_banded(
     const std::vector<RpcInfo>& scenes,
-    const std::vector<RpcBaBand>& bands,
     const std::vector<RpcBaPoint>& points,
-    std::vector<RpcAffine>& scene_affines,
-    std::vector<std::array<double, 2>>& band_shifts,
+    std::vector<RpcAffineBanded>& corrected,
     const RpcBaBandedOptions& options = {});
-
-// Assemble one scene's composite correction from the banded solve's
-// outputs: the bands belonging to `scene` (any order; `band_shifts` is
-// parallel to the FULL bands table), that scene's affine, and the basis
-// the solve used. Nullopt when the scene has more bands than
-// RpcAffineBanded::kMaxBands. The consumer-side blending (RpcAffineBanded)
-// is byte-for-byte the solver's internal evaluation, so corrections
-// assembled here reproduce the solved reprojection residuals exactly.
-inline std::optional<RpcAffineBanded> MakeRpcAffineBanded(
-    int scene,
-    const std::vector<RpcBaBand>& bands,
-    const RpcAffine& scene_affine,
-    const std::vector<std::array<double, 2>>& band_shifts,
-    RpcAffineBandBasis basis) {
-    std::vector<RpcAffineBanded::Band> mine;
-    for (std::size_t b = 0; b < bands.size(); ++b) {
-        if (bands[b].scene != scene) {
-            continue;
-        }
-        mine.push_back(RpcAffineBanded::Band{bands[b].row_lo,
-                                             bands[b].row_hi,
-                                             band_shifts[b][0],
-                                             band_shifts[b][1]});
-    }
-    return RpcAffineBanded::Make(scene_affine, std::move(mine), basis);
-}
 
 }  // namespace zproj::crs

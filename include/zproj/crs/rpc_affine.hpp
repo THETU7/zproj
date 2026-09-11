@@ -177,17 +177,36 @@ public:
     RpcAffineBanded() = default;
 
     // Host-side assembly: takes the bands in any order (sorted by row
-    // center internally), validates the count against kMaxBands. Nullopt
-    // on overflow.
+    // center internally), validates the count against kMaxBands and each
+    // band's row range. Nullopt on violation.
     static std::optional<RpcAffineBanded> Make(const RpcAffine& affine,
                                                std::vector<Band> bands,
                                                RpcAffineBandBasis basis);
+
+    // Uniform convenience: `num_bands` equal-width zero-shift bands tiling
+    // [row_lo, row_hi) around `affine` -- the fresh-solve starting point
+    // for solve_rpc_bundle_adjust_banded. Nullopt on the same violations.
+    static std::optional<RpcAffineBanded> MakeUniform(const RpcAffine& affine,
+                                                      double row_lo,
+                                                      double row_hi,
+                                                      int num_bands,
+                                                      RpcAffineBandBasis basis);
 
     ZT_HOST_DEVICE int num_bands() const noexcept { return num_bands_; }
     ZT_HOST_DEVICE const RpcAffine& affine() const noexcept { return affine_; }
     ZT_HOST_DEVICE RpcAffineBandBasis basis() const noexcept { return basis_; }
     ZT_HOST_DEVICE const Band& band(int i) const noexcept {
         return bands_[static_cast<std::size_t>(i)];
+    }
+
+    // Host-side mutators, the in/out path of solve_rpc_bundle_adjust_banded
+    // (band structure stays fixed; only the values move). set_band_shift
+    // indexes bands in the stored (center-sorted) order.
+    void set_affine(const RpcAffine& affine) noexcept { affine_ = affine; }
+    void set_band_shift(int i, double dx, double dy) noexcept {
+        Band& b = bands_[static_cast<std::size_t>(i)];
+        b.dx = dx;
+        b.dy = dy;
     }
 
     // The blended shift at one row, per the basis: the containing (else
@@ -296,6 +315,11 @@ inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
     if (bands.size() > static_cast<std::size_t>(kMaxBands)) {
         return std::nullopt;
     }
+    for (const Band& b : bands) {
+        if (!(b.row_lo < b.row_hi)) {
+            return std::nullopt;
+        }
+    }
     std::sort(bands.begin(), bands.end(), [](const Band& a, const Band& b) {
         return (a.row_lo + a.row_hi) < (b.row_lo + b.row_hi);
     });
@@ -307,6 +331,27 @@ inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
         out.bands_[i] = bands[i];
     }
     return out;
+}
+
+inline std::optional<RpcAffineBanded> RpcAffineBanded::MakeUniform(
+    const RpcAffine& affine,
+    double row_lo,
+    double row_hi,
+    int num_bands,
+    RpcAffineBandBasis basis) {
+    if (num_bands < 0 || num_bands > kMaxBands || !(row_lo < row_hi)) {
+        return std::nullopt;
+    }
+    std::vector<Band> bands(static_cast<std::size_t>(num_bands));
+    for (int i = 0; i < num_bands; ++i) {
+        const double lo = row_lo + (row_hi - row_lo) * static_cast<double>(i) /
+                                       static_cast<double>(num_bands);
+        const double hi = row_lo + (row_hi - row_lo) *
+                                       static_cast<double>(i + 1) /
+                                       static_cast<double>(num_bands);
+        bands[static_cast<std::size_t>(i)] = Band{lo, hi, 0.0, 0.0};
+    }
+    return Make(affine, std::move(bands), basis);
 }
 
 // How many affine parameters per image the solver floats; the enum value is

@@ -35,12 +35,10 @@ namespace {
 using zproj::crs::Ecef;
 using zproj::crs::Geodetic;
 using zproj::crs::kDegToRad;
-using zproj::crs::MakeRpcAffineBanded;
 using zproj::crs::rpc_forward_point;
 using zproj::crs::RpcAffine;
 using zproj::crs::RpcAffineBandBasis;
 using zproj::crs::RpcAffineBanded;
-using zproj::crs::RpcBaBand;
 using zproj::crs::RpcBaBandedOptions;
 using zproj::crs::RpcBaMeasure;
 using zproj::crs::RpcBaPoint;
@@ -215,19 +213,25 @@ int main(int argc, char** argv) {
               << "/" << kRowAmp << " px, sigma " << kSigma
               << " px, outlier every " << kOutlierEvery << " points\n\n";
 
-    std::vector<RpcBaBand> bands;
+    // The scene corrections travel as RpcAffineBanded values, in and out:
+    // uniform zero-shift tent bands around identity affines for a fresh
+    // solve; the solve overwrites them in place.
+    std::vector<RpcAffineBanded> corrected;
+    corrected.reserve(static_cast<std::size_t>(kNumScenes));
     for (int s = 0; s < kNumScenes; ++s) {
-        for (int i = 0; i < kBandsPerScene; ++i) {
-            bands.push_back(RpcBaBand{s,
-                                      kRowSpan * static_cast<double>(i) /
-                                          static_cast<double>(kBandsPerScene),
-                                      kRowSpan * static_cast<double>(i + 1) /
-                                          static_cast<double>(kBandsPerScene)});
+        auto scene = RpcAffineBanded::MakeUniform(RpcAffine::Identity(),
+                                                  0.0,
+                                                  kRowSpan,
+                                                  kBandsPerScene,
+                                                  RpcAffineBandBasis::Linear);
+        if (!scene) {
+            std::cout << "scene " << s << ": bad band structure\n";
+            return 1;
         }
+        corrected.push_back(*scene);
     }
 
     RpcBaBandedOptions options;
-    options.basis = RpcAffineBandBasis::Linear;
     options.pixel_sigma = kSigma;
     options.robust_threshold_px = 3.0 * kSigma;
     // Row regions without a GCP carry their own common mode (all scenes'
@@ -236,11 +240,8 @@ int main(int argc, char** argv) {
     // scene affine" (see rpc_bundle_adjust.hpp's observability note).
     options.band_shift_prior_weight = 0.1;
 
-    std::vector<RpcAffine> affines(static_cast<std::size_t>(kNumScenes),
-                                   RpcAffine::Identity());
-    std::vector<std::array<double, 2>> shifts(bands.size(), {0.0, 0.0});
-    const RpcBaReport report = solve_rpc_bundle_adjust_banded(
-        scenes, bands, points, affines, shifts, options);
+    const RpcBaReport report =
+        solve_rpc_bundle_adjust_banded(scenes, points, corrected, options);
 
     std::cout << std::fixed << std::setprecision(3);
     if (!report.ok) {
@@ -252,25 +253,6 @@ int main(int argc, char** argv) {
               << " GCPs, " << report.num_points_skipped << " skipped\n"
               << "reprojection RMS: " << report.rms_before_px << " px -> "
               << report.rms_after_px << " px\n\n";
-
-    // Assemble the consumer-side corrections: one RpcAffineBanded value
-    // per scene (affine + band table + shifts bundled) -- everything below
-    // consumes these directly.
-    std::vector<RpcAffineBanded> corrected;
-    corrected.reserve(static_cast<std::size_t>(kNumScenes));
-    for (int s = 0; s < kNumScenes; ++s) {
-        auto scene_correction =
-            MakeRpcAffineBanded(s,
-                                bands,
-                                affines[static_cast<std::size_t>(s)],
-                                shifts,
-                                options.basis);
-        if (!scene_correction) {
-            std::cout << "scene " << s << ": too many bands\n";
-            return 1;
-        }
-        corrected.push_back(*scene_correction);
-    }
 
     // Residual RMS by row tenth, raw vs corrected: the W shape must
     // flatten. (Clean points only; outlier-corrupted measures stay bad by
