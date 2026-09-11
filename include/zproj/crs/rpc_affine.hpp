@@ -48,8 +48,10 @@
 // generalizes the same formulation to N views over a control network.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -108,6 +110,204 @@ struct RpcAffine {
         return true;
     }
 };
+
+// How a banded affine blends its band shifts across rows (the correction
+// basis shared by the banded solver and RpcAffineBanded below).
+enum class RpcAffineBandBasis {
+    // One-hot: the band whose [row_lo, row_hi) contains the row takes the
+    // full shift (nearest band outside the covered range). Piecewise-
+    // constant correction; jumps at band boundaries.
+    Constant,
+    // Tent: linear interpolation between the two nearest band centers
+    // (constant extension outside them). Piecewise-LINEAR, C0-continuous
+    // -- no seams. The usual choice for smooth row-dependent error.
+    Linear,
+};
+
+// The consumer-side composite correction of solve_rpc_bundle_adjust_banded
+// (rpc_bundle_adjust.hpp): one RpcAffine plus per-band translation shifts,
+// ready to apply to pixels -- downstream code consumes THIS instead of
+// juggling the scene affine, the band table and the shift table and
+// re-implementing the blending.
+//
+//     col' = (e0 + dx_band(row)) + e1*col + e2*row
+//     row' = (f0 + dy_band(row)) + f1*col + f2*row
+//
+// Fixed-size storage (kMaxBands, the same cap convention as the CUDA
+// N-view kernels) keeps the struct a plain-data value that device kernels
+// can take by value, like RpcAffine. Bands are stored sorted by row
+// center at Make() time (host); the blending methods are host/device
+// shared arithmetic. Compose with the existing machinery through
+// EffectiveAffine:
+//
+//     corrected pixel:            baff.Apply(col, row, c2, r2);
+//     forward through correction: rpc_forward_point_affine(
+//                                     info, baff.EffectiveAffine(row), ...);
+//     back-projection / rays:     rpc_ray_affine(
+//                                     info, init, baff.EffectiveAffine(row),
+//                                     col, row, h_lo, h_hi, ray);
+//
+// The EffectiveAffine row for BACK-projection is the observed pixel's row:
+// the shift varies slowly with row, so the slope-times-shift error of
+// un-applying at the observed row rather than the exact pre-correction row
+// is milli-pixel scale.
+//
+// Uniqueness note: on the band-center span the composite correction is
+// uniquely determined by the solve, but in the constant-extension zones
+// beyond the outermost centers an affine tilt trades against per-point
+// ground gradients -- there the composite is only as good as the local
+// data anchor. Keep the outer band centers near the scene's row edges
+// (uniform tiling already does: the extension zones are half a band wide).
+class RpcAffineBanded {
+public:
+    // One band's correction: rows [row_lo, row_hi) shift by (dx, dy) px.
+    struct Band {
+        double row_lo = 0.0;
+        double row_hi = 0.0;
+        double dx = 0.0;
+        double dy = 0.0;
+    };
+
+    // Storage cap (bands per scene); raise if a scene ever needs finer
+    // banding. 32 uniform bands over a 50000-line scene is ~1560 lines per
+    // band -- far finer than any practical wave.
+    static constexpr int kMaxBands = 32;
+
+    // Identity affine with no bands.
+    RpcAffineBanded() = default;
+
+    // Host-side assembly: takes the bands in any order (sorted by row
+    // center internally), validates the count against kMaxBands. Nullopt
+    // on overflow.
+    static std::optional<RpcAffineBanded> Make(const RpcAffine& affine,
+                                               std::vector<Band> bands,
+                                               RpcAffineBandBasis basis);
+
+    ZT_HOST_DEVICE int num_bands() const noexcept { return num_bands_; }
+    ZT_HOST_DEVICE const RpcAffine& affine() const noexcept { return affine_; }
+    ZT_HOST_DEVICE RpcAffineBandBasis basis() const noexcept { return basis_; }
+    ZT_HOST_DEVICE const Band& band(int i) const noexcept {
+        return bands_[static_cast<std::size_t>(i)];
+    }
+
+    // The blended shift at one row, per the basis: the containing (else
+    // nearest) band under Constant, the tent interpolation between the two
+    // bracketing centers (constant extension outside them) under Linear.
+    // Zero when there are no bands.
+    ZT_HOST_DEVICE void ShiftAt(double row, double& dx, double& dy) const {
+        dx = 0.0;
+        dy = 0.0;
+        if (num_bands_ == 0) {
+            return;
+        }
+        if (basis_ == RpcAffineBandBasis::Constant) {
+            int pick = -1;
+            for (int i = 0; i < num_bands_; ++i) {
+                const Band& b = bands_[static_cast<std::size_t>(i)];
+                if (row >= b.row_lo && row < b.row_hi) {
+                    pick = i;
+                    break;
+                }
+            }
+            if (pick < 0) {
+                // Outside every band: nearest center.
+                double best = HUGE_VAL;
+                for (int i = 0; i < num_bands_; ++i) {
+                    const double d = fabs(Center(i) - row);
+                    if (d < best) {
+                        best = d;
+                        pick = i;
+                    }
+                }
+            }
+            dx = bands_[static_cast<std::size_t>(pick)].dx;
+            dy = bands_[static_cast<std::size_t>(pick)].dy;
+            return;
+        }
+        // Linear (tent) basis over the center-sorted bands.
+        int j = 0;
+        while (j < num_bands_ && Center(j) < row) {
+            ++j;
+        }
+        if (j == 0 || j == num_bands_) {
+            // Constant extension outside the center span.
+            const Band& b =
+                bands_[static_cast<std::size_t>(j == 0 ? 0 : num_bands_ - 1)];
+            dx = b.dx;
+            dy = b.dy;
+            return;
+        }
+        const int i = j - 1;
+        const double span = Center(j) - Center(i);
+        if (!(span > 0.0)) {
+            const Band& b = bands_[static_cast<std::size_t>(j)];
+            dx = b.dx;
+            dy = b.dy;
+            return;
+        }
+        const double w = (Center(j) - row) / span;
+        const Band& lo = bands_[static_cast<std::size_t>(i)];
+        const Band& hi = bands_[static_cast<std::size_t>(j)];
+        dx = (w * lo.dx) + ((1.0 - w) * hi.dx);
+        dy = (w * lo.dy) + ((1.0 - w) * hi.dy);
+    }
+
+    // The affine with the shift at `row` folded into the translations --
+    // the composition point with rpc_forward_point_affine / rpc_ray_affine.
+    ZT_HOST_DEVICE RpcAffine EffectiveAffine(double row) const {
+        RpcAffine eff = affine_;
+        double dx = 0.0;
+        double dy = 0.0;
+        ShiftAt(row, dx, dy);
+        eff.p[0] += dx;
+        eff.p[3] += dy;
+        return eff;
+    }
+
+    // RPC pixel -> corrected pixel: the affine, then the blended shift.
+    ZT_HOST_DEVICE void Apply(double col,
+                              double row,
+                              double& out_col,
+                              double& out_row) const {
+        affine_.Apply(col, row, out_col, out_row);
+        double dx = 0.0;
+        double dy = 0.0;
+        ShiftAt(row, dx, dy);
+        out_col += dx;
+        out_row += dy;
+    }
+
+private:
+    ZT_HOST_DEVICE double Center(int i) const {
+        const Band& b = bands_[static_cast<std::size_t>(i)];
+        return 0.5 * (b.row_lo + b.row_hi);
+    }
+
+    RpcAffine affine_;
+    RpcAffineBandBasis basis_ = RpcAffineBandBasis::Linear;
+    int num_bands_ = 0;
+    std::array<Band, static_cast<std::size_t>(kMaxBands)> bands_{};
+};
+
+inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
+    const RpcAffine& affine,
+    std::vector<Band> bands,
+    RpcAffineBandBasis basis) {
+    if (bands.size() > static_cast<std::size_t>(kMaxBands)) {
+        return std::nullopt;
+    }
+    std::sort(bands.begin(), bands.end(), [](const Band& a, const Band& b) {
+        return (a.row_lo + a.row_hi) < (b.row_lo + b.row_hi);
+    });
+    RpcAffineBanded out;
+    out.affine_ = affine;
+    out.basis_ = basis;
+    out.num_bands_ = static_cast<int>(bands.size());
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+        out.bands_[i] = bands[i];
+    }
+    return out;
+}
 
 // How many affine parameters per image the solver floats; the enum value is
 // the parameter count.

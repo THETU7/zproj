@@ -62,7 +62,9 @@
 
 #include <array>
 #include <limits>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "zproj/crs/rpc.hpp"
@@ -188,7 +190,7 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 // bands): a measure's band follows from its pixel row, so ordinary
 // multi-scene match networks plug in unchanged. Rows outside a scene's
 // band range clamp to the nearest band (constant extension under
-// RpcBaBandBasis::Linear).
+// RpcAffineBandBasis::Linear).
 //
 // Approximation power: fitting a full-period wave of amplitude A with N
 // bands leaves ~A*pi^2/(2N^2) px (Linear basis) -- N=12, A=5 px gives
@@ -196,19 +198,10 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 // should stay beside the RPC as separate correction layers; folding it
 // back into refitted RPC coefficients re-smears the wave (a cubic
 // rational polynomial cannot carry it).
-
-// How a measure's pixel row blends the band shifts of its scene.
-enum class RpcBaBandBasis {
-    // One-hot: the band whose [row_lo, row_hi) contains the measure's row
-    // takes the full shift (nearest band outside the covered range).
-    // Piecewise-constant correction; jumps at band boundaries of the same
-    // order as the within-band approximation error.
-    Constant,
-    // Tent: linear interpolation between the two nearest band centers
-    // (constant extension outside them). Piecewise-LINEAR, C0-continuous
-    // correction -- no seams. The default.
-    Linear,
-};
+//
+// Consumption: assemble each scene's correction into an RpcAffineBanded
+// (rpc_affine.hpp) with MakeRpcAffineBanded below -- one value that
+// downstream code applies to pixels directly.
 
 // One row band [row_lo, row_hi) of one scene. Bands of a scene need not
 // tile exactly (gaps/overlaps are tolerated; assignment falls back to the
@@ -224,8 +217,9 @@ struct RpcBaBand {
 // ones. `dof` restricts the scene affines only (the band shifts are always
 // 2-parameter translations).
 struct RpcBaBandedOptions : RpcBaOptions {
-    // Shift blending across rows (see RpcBaBandBasis).
-    RpcBaBandBasis basis = RpcBaBandBasis::Linear;
+    // Shift blending across rows (see RpcAffineBandBasis in rpc_affine.hpp;
+    // the solver's internal evaluation matches RpcAffineBanded exactly).
+    RpcAffineBandBasis basis = RpcAffineBandBasis::Linear;
     // Tikhonov weight pulling each free band shift towards zero (i.e.
     // towards the scene affine alone). 0 disables. Recommended for
     // matches-only banded solves (see the observability caveat above) and
@@ -246,5 +240,31 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     std::vector<RpcAffine>& scene_affines,
     std::vector<std::array<double, 2>>& band_shifts,
     const RpcBaBandedOptions& options = {});
+
+// Assemble one scene's composite correction from the banded solve's
+// outputs: the bands belonging to `scene` (any order; `band_shifts` is
+// parallel to the FULL bands table), that scene's affine, and the basis
+// the solve used. Nullopt when the scene has more bands than
+// RpcAffineBanded::kMaxBands. The consumer-side blending (RpcAffineBanded)
+// is byte-for-byte the solver's internal evaluation, so corrections
+// assembled here reproduce the solved reprojection residuals exactly.
+inline std::optional<RpcAffineBanded> MakeRpcAffineBanded(
+    int scene,
+    const std::vector<RpcBaBand>& bands,
+    const RpcAffine& scene_affine,
+    const std::vector<std::array<double, 2>>& band_shifts,
+    RpcAffineBandBasis basis) {
+    std::vector<RpcAffineBanded::Band> mine;
+    for (std::size_t b = 0; b < bands.size(); ++b) {
+        if (bands[b].scene != scene) {
+            continue;
+        }
+        mine.push_back(RpcAffineBanded::Band{bands[b].row_lo,
+                                             bands[b].row_hi,
+                                             band_shifts[b][0],
+                                             band_shifts[b][1]});
+    }
+    return RpcAffineBanded::Make(scene_affine, std::move(mine), basis);
+}
 
 }  // namespace zproj::crs

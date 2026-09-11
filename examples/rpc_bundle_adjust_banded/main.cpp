@@ -35,10 +35,12 @@ namespace {
 using zproj::crs::Ecef;
 using zproj::crs::Geodetic;
 using zproj::crs::kDegToRad;
+using zproj::crs::MakeRpcAffineBanded;
 using zproj::crs::rpc_forward_point;
 using zproj::crs::RpcAffine;
+using zproj::crs::RpcAffineBandBasis;
+using zproj::crs::RpcAffineBanded;
 using zproj::crs::RpcBaBand;
-using zproj::crs::RpcBaBandBasis;
 using zproj::crs::RpcBaBandedOptions;
 using zproj::crs::RpcBaMeasure;
 using zproj::crs::RpcBaPoint;
@@ -127,69 +129,6 @@ std::vector<Pt> MakePoints(std::size_t n, const RpcInfo& info) {
         pts[i] = Pt{lon(rng), lat(rng), alt(rng)};
     }
     return pts;
-}
-
-// The tent-blended band shift at one row (mirrors the solver's Linear
-// basis): linear interpolation between the two bracketing band centers,
-// constant extension outside them.
-std::array<double, 2> TentShift(
-    const std::vector<RpcBaBand>& bands,
-    int scene,
-    const std::vector<std::array<double, 2>>& shifts,
-    double row) {
-    std::vector<int> mine;
-    for (std::size_t b = 0; b < bands.size(); ++b) {
-        if (bands[b].scene == scene) {
-            mine.push_back(static_cast<int>(b));
-        }
-    }
-    std::sort(mine.begin(), mine.end(), [&](int a, int c) {
-        return (bands[static_cast<std::size_t>(a)].row_lo +
-                bands[static_cast<std::size_t>(a)].row_hi) <
-               (bands[static_cast<std::size_t>(c)].row_lo +
-                bands[static_cast<std::size_t>(c)].row_hi);
-    });
-    if (mine.size() < 2) {
-        return shifts[static_cast<std::size_t>(mine.front())];
-    }
-    const auto Center = [&](int b) {
-        return 0.5 * (bands[static_cast<std::size_t>(b)].row_lo +
-                      bands[static_cast<std::size_t>(b)].row_hi);
-    };
-    std::size_t j = 0;
-    while (j < mine.size() && Center(mine[j]) < row) {
-        ++j;
-    }
-    if (j == 0) {
-        return shifts[static_cast<std::size_t>(mine.front())];
-    }
-    if (j == mine.size()) {
-        return shifts[static_cast<std::size_t>(mine.back())];
-    }
-    const int lo = mine[j - 1];
-    const int hi = mine[j];
-    const double span = Center(hi) - Center(lo);
-    if (!(span > 0.0)) {
-        return shifts[static_cast<std::size_t>(hi)];
-    }
-    const double w = (Center(hi) - row) / span;
-    const auto& s_lo = shifts[static_cast<std::size_t>(lo)];
-    const auto& s_hi = shifts[static_cast<std::size_t>(hi)];
-    return {w * s_lo[0] + (1.0 - w) * s_hi[0],
-            w * s_lo[1] + (1.0 - w) * s_hi[1]};
-}
-
-// The effective correction of one pixel (scene affine + tent shift).
-RpcAffine EffectiveAffine(const std::vector<RpcBaBand>& bands,
-                          const std::vector<RpcAffine>& affines,
-                          const std::vector<std::array<double, 2>>& shifts,
-                          int scene,
-                          double row) {
-    RpcAffine eff = affines[static_cast<std::size_t>(scene)];
-    const std::array<double, 2> d = TentShift(bands, scene, shifts, row);
-    eff.p[0] += d[0];
-    eff.p[3] += d[1];
-    return eff;
 }
 
 }  // namespace
@@ -288,7 +227,7 @@ int main(int argc, char** argv) {
     }
 
     RpcBaBandedOptions options;
-    options.basis = RpcBaBandBasis::Linear;
+    options.basis = RpcAffineBandBasis::Linear;
     options.pixel_sigma = kSigma;
     options.robust_threshold_px = 3.0 * kSigma;
     // Row regions without a GCP carry their own common mode (all scenes'
@@ -314,6 +253,25 @@ int main(int argc, char** argv) {
               << "reprojection RMS: " << report.rms_before_px << " px -> "
               << report.rms_after_px << " px\n\n";
 
+    // Assemble the consumer-side corrections: one RpcAffineBanded value
+    // per scene (affine + band table + shifts bundled) -- everything below
+    // consumes these directly.
+    std::vector<RpcAffineBanded> corrected;
+    corrected.reserve(static_cast<std::size_t>(kNumScenes));
+    for (int s = 0; s < kNumScenes; ++s) {
+        auto scene_correction =
+            MakeRpcAffineBanded(s,
+                                bands,
+                                affines[static_cast<std::size_t>(s)],
+                                shifts,
+                                options.basis);
+        if (!scene_correction) {
+            std::cout << "scene " << s << ": too many bands\n";
+            return 1;
+        }
+        corrected.push_back(*scene_correction);
+    }
+
     // Residual RMS by row tenth, raw vs corrected: the W shape must
     // flatten. (Clean points only; outlier-corrupted measures stay bad by
     // design -- the robust loss keeps them from biasing the SOLVE.)
@@ -338,7 +296,8 @@ int main(int argc, char** argv) {
                     std::min(kBuckets - 1,
                              static_cast<int>(m.row / (kRowSpan / kBuckets)));
                 const RpcAffine eff =
-                    EffectiveAffine(bands, affines, shifts, m.view, m.row);
+                    corrected[static_cast<std::size_t>(m.view)].EffectiveAffine(
+                        m.row);
                 const double raw_c = c - m.col;
                 const double raw_r = r - m.row;
                 const double cor_c =
@@ -386,7 +345,8 @@ int main(int argc, char** argv) {
                                   c,
                                   r);
                 const RpcAffine eff =
-                    EffectiveAffine(bands, affines, shifts, m.view, m.row);
+                    corrected[static_cast<std::size_t>(m.view)].EffectiveAffine(
+                        m.row);
                 worst = std::max(
                     worst,
                     std::fabs((eff.p[0] + (eff.p[1] * c) + (eff.p[2] * r)) -
@@ -420,9 +380,9 @@ int main(int argc, char** argv) {
                 const RpcInfo& v = scenes[static_cast<std::size_t>(m.view)];
                 const double span = std::min(0.9 * v.height_scale, 50.0);
                 const RpcAffine eff =
-                    which == 1
-                        ? EffectiveAffine(bands, affines, shifts, m.view, m.row)
-                        : RpcAffine::Identity();
+                    which == 1 ? corrected[static_cast<std::size_t>(m.view)]
+                                     .EffectiveAffine(m.row)
+                               : RpcAffine::Identity();
                 RpcRay ray;
                 if (zproj::crs::rpc_ray_affine(
                         v,

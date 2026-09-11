@@ -571,8 +571,10 @@ TEST(SolveRpcBundleAdjust, MalformedPointsSkipped) {
 
 // =================== banded (global affine + band shifts) =================
 
+using zproj::crs::MakeRpcAffineBanded;
+using zproj::crs::RpcAffineBandBasis;
+using zproj::crs::RpcAffineBanded;
 using zproj::crs::RpcBaBand;
-using zproj::crs::RpcBaBandBasis;
 using zproj::crs::RpcBaBandedOptions;
 using zproj::crs::solve_rpc_bundle_adjust_banded;
 
@@ -703,7 +705,7 @@ TEST(SolveRpcBundleAdjustBanded, RecoversWaveTentWithGcps) {
 
     const std::vector<RpcBaBand> bands = MakeUniformBands(3, 12);
     RpcBaBandedOptions options;
-    options.basis = RpcBaBandBasis::Linear;
+    options.basis = RpcAffineBandBasis::Linear;
     std::vector<RpcAffine> aff = IdentityAffines(3);
     std::vector<std::array<double, 2>> shifts = ZeroShifts(bands.size());
     const RpcBaReport report = solve_rpc_bundle_adjust_banded(
@@ -748,8 +750,8 @@ TEST(SolveRpcBundleAdjustBanded, TentBeatsConstant) {
     const std::vector<RpcBaBand> bands = MakeUniformBands(3, 12);
 
     double rms[2] = {0.0, 0.0};
-    const RpcBaBandBasis bases[2] = {RpcBaBandBasis::Linear,
-                                     RpcBaBandBasis::Constant};
+    const RpcAffineBandBasis bases[2] = {RpcAffineBandBasis::Linear,
+                                         RpcAffineBandBasis::Constant};
     for (int i = 0; i < 2; ++i) {
         RpcBaBandedOptions options;
         options.basis = bases[i];
@@ -918,6 +920,228 @@ TEST(SolveRpcBundleAdjustBanded, MalformedInputSkipped) {
     ASSERT_TRUE(report.ok) << report.message;
     EXPECT_EQ(report.num_points, 64);
     EXPECT_EQ(report.num_points_skipped, 1);
+}
+
+// ==================== RpcAffineBanded (consumer side) =====================
+
+// The band-blending semantics: Constant picks the containing (else
+// nearest-center) band; Linear interpolates between band centers with
+// constant extension; Make sorts the bands; EffectiveAffine folds the
+// shift into the translations; Apply is affine-then-shift.
+TEST(RpcAffineBanded, BlendingSemantics) {
+    using Band = RpcAffineBanded::Band;
+    // Identity affine + three bands, passed in SHUFFLED order.
+    const std::vector<Band> shuffled{
+        Band{20.0, 30.0, -2.0, 2.0},
+        Band{0.0, 10.0, 1.0, -1.0},
+        Band{10.0, 20.0, 3.0, 1.0},
+    };
+
+    const auto constant = RpcAffineBanded::Make(
+        RpcAffine::Identity(), shuffled, RpcAffineBandBasis::Constant);
+    ASSERT_TRUE(constant.has_value());
+    EXPECT_EQ(constant->num_bands(), 3);
+    const auto ConstantShift = [&](double row, double dx, double dy) {
+        double gx = 99.0;
+        double gy = 99.0;
+        constant->ShiftAt(row, gx, gy);
+        EXPECT_NEAR(gx, dx, 1e-12) << "row " << row;
+        EXPECT_NEAR(gy, dy, 1e-12) << "row " << row;
+    };
+    ConstantShift(0.0, 1.0, -1.0);
+    ConstantShift(9.9, 1.0, -1.0);
+    ConstantShift(10.0, 3.0, 1.0);  // [row_lo, row_hi) containment
+    ConstantShift(15.0, 3.0, 1.0);
+    ConstantShift(25.0, -2.0, 2.0);
+    ConstantShift(-7.0, 1.0, -1.0);  // outside: nearest center is 5
+    ConstantShift(40.0, -2.0, 2.0);  // outside: nearest center is 25
+
+    const auto linear = RpcAffineBanded::Make(
+        RpcAffine::Identity(), shuffled, RpcAffineBandBasis::Linear);
+    ASSERT_TRUE(linear.has_value());
+    const auto LinearShift = [&](double row, double dx, double dy) {
+        double gx = 99.0;
+        double gy = 99.0;
+        linear->ShiftAt(row, gx, gy);
+        EXPECT_NEAR(gx, dx, 1e-12) << "row " << row;
+        EXPECT_NEAR(gy, dy, 1e-12) << "row " << row;
+    };
+    // Centers at 5 / 15 / 25: tent interpolation, constant extension.
+    LinearShift(5.0, 1.0, -1.0);
+    LinearShift(10.0, 2.0, 0.0);  // midpoint of bands 0 and 1
+    LinearShift(15.0, 3.0, 1.0);
+    LinearShift(20.0, 0.5, 1.5);  // midpoint of bands 1 and 2
+    LinearShift(25.0, -2.0, 2.0);
+    LinearShift(-3.0, 1.0, -1.0);
+    LinearShift(29.0, -2.0, 2.0);
+
+    // EffectiveAffine folds the shift into the translations only; Apply is
+    // the affine followed by the shift.
+    RpcAffine a;
+    a.p = {2.0, 1.001, 1e-4, -1.0, 2e-5, 0.999};
+    const auto shifted =
+        RpcAffineBanded::Make(a,
+                              std::vector<Band>{Band{0.0, 100.0, 4.0, -3.0}},
+                              RpcAffineBandBasis::Linear);
+    ASSERT_TRUE(shifted.has_value());
+    const RpcAffine eff = shifted->EffectiveAffine(42.0);
+    for (int k = 0; k < 6; ++k) {
+        const double want = (k == 0)   ? a.p[0] + 4.0
+                            : (k == 3) ? a.p[3] - 3.0
+                                       : a.p[static_cast<std::size_t>(k)];
+        EXPECT_DOUBLE_EQ(eff.p[static_cast<std::size_t>(k)], want);
+    }
+    double c = 0.0;
+    double r = 0.0;
+    a.Apply(10.0, 20.0, c, r);
+    double gc = 0.0;
+    double gr = 0.0;
+    shifted->Apply(10.0, 20.0, gc, gr);
+    EXPECT_DOUBLE_EQ(gc, c + 4.0);
+    EXPECT_DOUBLE_EQ(gr, r - 3.0);
+
+    // Default construction: identity affine, no bands, no shift.
+    const RpcAffineBanded plain;
+    double dx = 99.0;
+    double dy = 99.0;
+    plain.ShiftAt(123.0, dx, dy);
+    EXPECT_EQ(dx, 0.0);
+    EXPECT_EQ(dy, 0.0);
+    plain.Apply(10.0, 20.0, gc, gr);
+    EXPECT_DOUBLE_EQ(gc, 10.0);
+    EXPECT_DOUBLE_EQ(gr, 20.0);
+
+    // The storage cap: kMaxBands accepted, one more rejected.
+    const std::vector<Band> max_bands(
+        static_cast<std::size_t>(RpcAffineBanded::kMaxBands),
+        Band{0.0, 1.0, 0.0, 0.0});
+    EXPECT_TRUE(RpcAffineBanded::Make(RpcAffine::Identity(),
+                                      max_bands,
+                                      RpcAffineBandBasis::Linear)
+                    .has_value());
+    const std::vector<Band> too_many(
+        static_cast<std::size_t>(RpcAffineBanded::kMaxBands) + 1);
+    EXPECT_FALSE(RpcAffineBanded::Make(RpcAffine::Identity(),
+                                       too_many,
+                                       RpcAffineBandBasis::Linear)
+                     .has_value());
+}
+
+// End-to-end consistency between the solver's internal evaluation and the
+// consumer class: corrupt the pixels through an RpcAffineBanded built from
+// KNOWN truth (zero-mean band shifts, so the truth sits exactly inside the
+// solver's constrained family), solve, reassemble through
+// MakeRpcAffineBanded, and require the composite corrections to agree --
+// pins the consumer-side blending to the solver's, bit for bit.
+TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
+    constexpr double kTwoPi = 6.2831853071795865;
+    constexpr int kBandsPerScene = 8;
+    const std::vector<RpcInfo> views = MakeBaViews(3);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(3);
+
+    // Zero-mean shift patterns over the uniform band centers (full-period
+    // harmonics), distinct per scene.
+    std::vector<RpcAffineBanded> truth_banded;
+    for (int s = 0; s < 3; ++s) {
+        std::vector<RpcAffineBanded::Band> bs;
+        for (int i = 0; i < kBandsPerScene; ++i) {
+            bs.push_back(RpcAffineBanded::Band{
+                kRowSpan * static_cast<double>(i) /
+                    static_cast<double>(kBandsPerScene),
+                kRowSpan * static_cast<double>(i + 1) /
+                    static_cast<double>(kBandsPerScene),
+                3.0 * std::sin((kTwoPi * i / kBandsPerScene) + s),
+                2.0 * std::cos((kTwoPi * i / kBandsPerScene) - s)});
+        }
+        truth_banded.push_back(
+            *RpcAffineBanded::Make(truth[static_cast<std::size_t>(s)],
+                                   std::move(bs),
+                                   RpcAffineBandBasis::Linear));
+    }
+
+    // Corrupt the pixels through the truth composites (noiseless). GCPs
+    // at row strides anchor the per-row-region common modes -- without
+    // them the composites drift by a smooth common pattern that the free
+    // ground blocks absorb (the documented observability caveat), and the
+    // composite-vs-truth comparison below would be meaningless.
+    const std::vector<Pt> pts = MakePoints(120, views[0]);
+    std::vector<RpcBaPoint> points;
+    points.reserve(pts.size() + 8);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        RpcBaPoint pt;
+        for (int v = 0; v < 3; ++v) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[static_cast<std::size_t>(v)],
+                              pts[i].lon,
+                              pts[i].lat,
+                              pts[i].alt,
+                              c,
+                              r);
+            truth_banded[static_cast<std::size_t>(v)].Apply(c, r, c, r);
+            pt.measures.push_back(RpcBaMeasure{v, c, r});
+        }
+        points.push_back(pt);
+    }
+    for (int k = 0; k < 8; ++k) {
+        const std::size_t idx = (static_cast<std::size_t>(k) * pts.size()) / 8;
+        RpcBaPoint gcp = points[idx];
+        gcp.ground_fixed = true;
+        gcp.lon = pts[idx].lon;
+        gcp.lat = pts[idx].lat;
+        gcp.height = pts[idx].alt;
+        points.push_back(gcp);
+    }
+
+    const std::vector<RpcBaBand> bands = MakeUniformBands(3, kBandsPerScene);
+    RpcBaBandedOptions options;
+    options.basis = RpcAffineBandBasis::Linear;
+    std::vector<RpcAffine> aff = IdentityAffines(3);
+    std::vector<std::array<double, 2>> shifts = ZeroShifts(bands.size());
+    const RpcBaReport report = solve_rpc_bundle_adjust_banded(
+        views, bands, points, aff, shifts, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    // The truth lies inside the model family: the fit is exact (the small
+    // residue is the row-argument offset between corruption and solve).
+    EXPECT_LT(report.rms_after_px, 0.05);
+
+    for (int s = 0; s < 3; ++s) {
+        const auto got = MakeRpcAffineBanded(s,
+                                             bands,
+                                             aff[static_cast<std::size_t>(s)],
+                                             shifts,
+                                             RpcAffineBandBasis::Linear);
+        ASSERT_TRUE(got.has_value()) << "scene " << s;
+        EXPECT_EQ(got->num_bands(), kBandsPerScene) << "scene " << s;
+        // Compare on the band-center span, where the composite is uniquely
+        // determined: beyond the outermost centers the affine tilt trades
+        // against per-point ground gradients, so the constant-extension
+        // zones are only data-anchored (a documented property of the tent
+        // basis, not a solver defect).
+        const double row_lo =
+            0.5 * bands[static_cast<std::size_t>(s * kBandsPerScene)].row_hi;
+        const double row_hi =
+            0.5 * (bands[static_cast<std::size_t>((s + 1) * kBandsPerScene - 1)]
+                       .row_lo +
+                   bands[static_cast<std::size_t>((s + 1) * kBandsPerScene - 1)]
+                       .row_hi);
+        for (double row = row_lo + 1.0; row < row_hi; row += 733.0) {
+            for (double col = 3.0; col < 100000.0; col += 6151.0) {
+                double want_c = 0.0;
+                double want_r = 0.0;
+                double got_c = 0.0;
+                double got_r = 0.0;
+                truth_banded[static_cast<std::size_t>(s)].Apply(
+                    col, row, want_c, want_r);
+                got->Apply(col, row, got_c, got_r);
+                EXPECT_NEAR(got_c, want_c, 0.05)
+                    << "scene " << s << " row " << row;
+                EXPECT_NEAR(got_r, want_r, 0.05)
+                    << "scene " << s << " row " << row;
+            }
+        }
+    }
 }
 
 }  // namespace

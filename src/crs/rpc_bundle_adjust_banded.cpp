@@ -286,7 +286,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     const auto BandTerms = [&](int scene, double row) {
         const SceneBands& sb = scene_bands[static_cast<std::size_t>(scene)];
         std::vector<std::pair<int, double>> terms;
-        if (options.basis == RpcBaBandBasis::Constant ||
+        if (options.basis == RpcAffineBandBasis::Constant ||
             sb.centers.size() < 2) {
             int pick = sb.by_center.front();
             for (int b : sb.by_center) {
