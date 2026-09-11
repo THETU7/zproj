@@ -88,6 +88,60 @@ inline RpcInfo MakeObliqueInfoRealistic() {
     return info;
 }
 
+// Oblique model with parametric height coupling: col = lon + samp_h * h,
+// row = lat + line_h * h -- the ray leans in the given image directions as
+// height changes. MakeObliqueInfo() is the special case (1e-4, 0).
+inline RpcInfo MakeLeaningInfo(double samp_height_coupling,
+                               double line_height_coupling) {
+    RpcInfo info = MakeNadirInfo();
+    info.samp_num_coeff[3] = samp_height_coupling;
+    info.line_num_coeff[3] = line_height_coupling;
+    return info;
+}
+
+inline RpcInfo MakeLeaningInfoRealistic(double samp_height_coupling,
+                                        double line_height_coupling) {
+    RpcInfo info = MakeNadirInfoRealistic();
+    info.samp_num_coeff[3] = samp_height_coupling;
+    info.line_num_coeff[3] = line_height_coupling;
+    return info;
+}
+
+// A deterministic multi-view RPC set: view 0 is nadir, views 1.. lean in
+// rotating azimuths (+col, +row, -col, -row, diagonals, ...) at the same
+// ~11 deg convergence as MakeObliqueInfo, so every view pair with the nadir
+// ray has a genuine convergence angle and the N-view normal equations are
+// well conditioned. num_views >= 1.
+inline std::vector<RpcInfo> MakeMultiViewInfos(int num_views) {
+    constexpr double k = 1e-4;
+    constexpr double kAzimuths[8][2] = {
+        {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
+    std::vector<RpcInfo> infos;
+    infos.reserve(static_cast<std::size_t>(num_views));
+    infos.push_back(MakeNadirInfo());
+    for (int i = 1; i < num_views; ++i) {
+        const auto& az = kAzimuths[(i - 1) % 8];
+        infos.push_back(MakeLeaningInfo(k * az[0], k * az[1]));
+    }
+    return infos;
+}
+
+// Realistic-footprint variant of MakeMultiViewInfos (0.05 deg window, the
+// float-ENU regime; same lean as MakeObliqueInfoRealistic).
+inline std::vector<RpcInfo> MakeMultiViewInfosRealistic(int num_views) {
+    constexpr double k = 0.02;
+    constexpr double kAzimuths[8][2] = {
+        {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
+    std::vector<RpcInfo> infos;
+    infos.reserve(static_cast<std::size_t>(num_views));
+    infos.push_back(MakeNadirInfoRealistic());
+    for (int i = 1; i < num_views; ++i) {
+        const auto& az = kAzimuths[(i - 1) % 8];
+        infos.push_back(MakeLeaningInfoRealistic(k * az[0], k * az[1]));
+    }
+    return infos;
+}
+
 // A ground point in the RPC models' geodetic units: degrees / metres.
 struct Pt {
     double lon;

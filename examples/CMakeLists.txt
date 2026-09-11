@@ -29,6 +29,14 @@ target_link_libraries(ztensor_basic PRIVATE zt::ztensor ${_zproj_gpu_runtime})
 add_executable(triangulation triangulation/main.cpp)
 target_link_libraries(triangulation PRIVATE zproj)
 
+# Multi-view (N >= 2) RPC triangulation: least-squares intersection of N
+# viewing rays (RpcMultiStereo, the Slabaugh normal equations). Synthetic
+# nadir + rotating-azimuth oblique views (no data file needed): reports
+# CPU/CUDA throughput for both precision paths, closed-loop accuracy vs known
+# ground truth, and CUDA-vs-CPU agreement.
+add_executable(nview_triangulation nview_triangulation/main.cpp)
+target_link_libraries(nview_triangulation PRIVATE zproj)
+
 # RPC affine bias-correction demo (Ceres): recover a known affine corruption
 # of a synthetic stereo pair from noisy matches with outliers; reports the
 # recovered vs true affines, before/after reprojection RMS, and the ground

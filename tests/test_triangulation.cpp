@@ -17,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -42,6 +43,7 @@
 namespace {
 
 using zproj::crs::Ecef;
+using zproj::crs::from_ecef;
 using zproj::crs::Geodetic;
 using zproj::crs::kDegToRad;
 using zproj::crs::kRadToDeg;
@@ -49,6 +51,7 @@ using zproj::crs::rpc_ray;
 using zproj::crs::RpcInfo;
 using zproj::crs::RpcInverseInit;
 using zproj::crs::RpcModel;
+using zproj::crs::RpcMultiStereo;
 using zproj::crs::RpcRay;
 using zproj::crs::RpcStereo;
 using zproj::crs::StereoPrecision;
@@ -56,6 +59,9 @@ using zproj::crs::to_ecef;
 using zproj::crs::triangulate_nview;
 using zproj::crs::triangulate_pair;
 using zproj_test::EcefDist;
+using zproj_test::MakeLeaningInfo;
+using zproj_test::MakeMultiViewInfos;
+using zproj_test::MakeMultiViewInfosRealistic;
 using zproj_test::MakeNadirInfo;
 using zproj_test::MakeNadirInfoRealistic;
 using zproj_test::MakeObliqueInfo;
@@ -117,6 +123,48 @@ constexpr double kRaySpanM = 50.0;
 #ifdef BUILD_CUDA_MODULE
 bool HasCudaDevice() { return zt::cuda::IsAvailable(); }
 #endif  // BUILD_CUDA_MODULE
+
+// Forward known ground points into every view of a multi-view set: per-view
+// [N, 2] (col, row) tensors, view-major order matching the infos.
+std::vector<zt::Tensor> ForwardViews(const std::vector<RpcInfo>& infos,
+                                     const zt::Tensor& in) {
+    std::vector<zt::Tensor> views;
+    views.reserve(infos.size());
+    for (const RpcInfo& info : infos) {
+        zt::Tensor cr;
+        RpcModel(info).lonlatalt_to_colrow(in, cr);
+        views.push_back(cr);
+    }
+    return views;
+}
+
+// Stack per-view [N, 2] tensors into the [V, N, 2] RpcMultiStereo input
+// (contiguous view-major copy).
+zt::Tensor StackViews(const std::vector<zt::Tensor>& views) {
+    const int64_t num = views.front().size(0);
+    zt::Tensor out = zt::empty({static_cast<int64_t>(views.size()), num, 2},
+                               zt::dtype(zt::kDouble));
+    double* dst = out.data_ptr<double>();
+    for (const zt::Tensor& v : views) {
+        std::memcpy(dst,
+                    v.data_ptr<double>(),
+                    static_cast<std::size_t>(num) * 2 * sizeof(double));
+        dst += 2 * num;
+    }
+    return out;
+}
+
+// Mark view `v` as not observing points whose index satisfies (i % period ==
+// phase), using the NaN convention of RpcMultiStereo::triangulate.
+void PunchNanHoles(zt::Tensor& colrow, int v, int64_t period, int64_t phase) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const int64_t num = colrow.size(1);
+    double* cr = colrow.data_ptr<double>();
+    for (int64_t i = phase; i < num; i += period) {
+        cr[2 * ((v * num) + i)] = nan;
+        cr[2 * ((v * num) + i) + 1] = nan;
+    }
+}
 
 // ============================== CPU path ================================
 
@@ -612,6 +660,356 @@ TEST(RpcStereoFloatCpu, FailedInverseWritesHugeVal) {
     EXPECT_EQ(rms.data_ptr<double>()[0], HUGE_VAL);
 }
 
+// ============================ multi-view (N) =============================
+
+// Closed loop over 4 views (nadir + 3 obliques leaning in different
+// azimuths): a known ground point projected into every view and triangulated
+// back must recover the original position -- the N-view normal equations on
+// top of the same ray construction as the two-view path.
+TEST(RpcMultiStereoCpu, ClosedLoopTriangulation) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(4);
+    const std::vector<Pt> pts = MakePoints(64, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    const RpcMultiStereo multi(infos,
+                               infos[0].height_off - kRaySpanM,
+                               infos[0].height_off + kRaySpanM);
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    multi.triangulate(colrow, lonlath, rms);
+
+    ASSERT_EQ(lonlath.size(0), static_cast<int64_t>(pts.size()));
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(ll[3 * i + 0], pts[i].lon, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 1], pts[i].lat, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 2], pts[i].alt, kTolClosedLoopH);
+        EXPECT_LT(rm[i], kTolClosedLoopRmsM) << "rms for a closed-loop point";
+    }
+}
+
+// Eight views exercise the rotating-azimuth table past one full cycle.
+TEST(RpcMultiStereoCpu, ClosedLoopEightViews) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(8);
+    const std::vector<Pt> pts = MakePoints(256, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    const RpcMultiStereo multi(infos,
+                               infos[0].height_off - kRaySpanM,
+                               infos[0].height_off + kRaySpanM);
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    multi.triangulate(colrow, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(ll[3 * i + 0], pts[i].lon, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 1], pts[i].lat, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 2], pts[i].alt, kTolClosedLoopH);
+        EXPECT_LT(rm[i], kTolClosedLoopRmsM);
+    }
+}
+
+// Two views through RpcMultiStereo must agree with RpcStereo: with no NaN
+// holes the multi-view loop builds the identical two rays and delegates to
+// the same closed form.
+TEST(RpcMultiStereoCpu, MatchesTwoViewPath) {
+    const RpcInfo left_info = MakeNadirInfo();
+    const RpcInfo right_info = MakeObliqueInfo();
+    const std::vector<RpcInfo> infos{left_info, right_info};
+    const std::vector<Pt> pts = MakePoints(64, left_info);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const std::vector<zt::Tensor> views = ForwardViews(infos, in);
+    const zt::Tensor colrow = StackViews(views);
+
+    const double h_low = left_info.height_off - kRaySpanM;
+    const double h_high = left_info.height_off + kRaySpanM;
+    zt::Tensor pair_ll;
+    zt::Tensor pair_rms;
+    RpcStereo(left_info, right_info, h_low, h_high)
+        .triangulate(views[0], views[1], pair_ll, pair_rms);
+    zt::Tensor multi_ll;
+    zt::Tensor multi_rms;
+    RpcMultiStereo(infos, h_low, h_high)
+        .triangulate(colrow, multi_ll, multi_rms);
+
+    const double* a = pair_ll.data_ptr<double>();
+    const double* b = multi_ll.data_ptr<double>();
+    const double* ra = pair_rms.data_ptr<double>();
+    const double* rb = multi_rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], 1e-12);
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], 1e-12);
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], 1e-9);
+        EXPECT_NEAR(rb[i], ra[i], 1e-9);
+    }
+}
+
+// The batch result must equal the pointwise triangulate_nview() on the rays
+// of the same views (the batch API is a loop over exactly that math).
+TEST(RpcMultiStereoCpu, MatchesPointwiseNview) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(4);
+    const std::vector<Pt> pts = MakePoints(16, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    const double h_low = infos[0].height_off - kRaySpanM;
+    const double h_high = infos[0].height_off + kRaySpanM;
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    RpcMultiStereo(infos, h_low, h_high).triangulate(colrow, lonlath, rms);
+
+    std::vector<RpcInverseInit> inits;
+    for (const RpcInfo& info : infos) {
+        inits.push_back(RpcModel(info).inverse_init());
+    }
+    const double* cr = colrow.data_ptr<double>();
+    const double* ll = lonlath.data_ptr<double>();
+    const int64_t num = static_cast<int64_t>(pts.size());
+    for (int64_t i = 0; i < num; ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        RpcRay rays[4];
+        for (int v = 0; v < 4; ++v) {
+            ASSERT_TRUE(rpc_ray(infos[v],
+                                inits[v],
+                                cr[2 * ((v * num) + i)],
+                                cr[2 * ((v * num) + i) + 1],
+                                h_low,
+                                h_high,
+                                rays[v]));
+        }
+        Ecef p;
+        double rms_pt = 0.0;
+        ASSERT_TRUE(triangulate_nview(rays, 4, p, rms_pt));
+        const Geodetic g = from_ecef(p);
+        EXPECT_NEAR(ll[3 * i + 0], g.x() * kRadToDeg, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 1], g.y() * kRadToDeg, kTolClosedLoopDeg);
+        EXPECT_NEAR(ll[3 * i + 2], g.z(), 1e-6);
+        EXPECT_NEAR(rms.data_ptr<double>()[i], rms_pt, 1e-6);
+    }
+}
+
+// A NaN pixel marks "this view does not observe this point": the view is
+// skipped, and the remaining views must reproduce their own two-view result.
+// Points left with fewer than two valid views fail (HUGE_VAL).
+TEST(RpcMultiStereoCpu, NanPixelSkipsView) {
+    const std::vector<RpcInfo> infos = {MakeNadirInfo(),
+                                        MakeLeaningInfo(1e-4, 0.0),
+                                        MakeLeaningInfo(-1e-4, 0.0)};
+    const std::vector<Pt> pts = MakePoints(32, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const std::vector<zt::Tensor> views = ForwardViews(infos, in);
+    zt::Tensor colrow = StackViews(views);
+    const int64_t num = colrow.size(1);
+
+    // View 1 observes nothing (all NaN); view 2 misses every 3rd point.
+    PunchNanHoles(colrow, 1, 1, 0);
+    PunchNanHoles(colrow, 2, 3, 0);
+
+    const double h_low = infos[0].height_off - kRaySpanM;
+    const double h_high = infos[0].height_off + kRaySpanM;
+    zt::Tensor multi_ll;
+    zt::Tensor multi_rms;
+    RpcMultiStereo(infos, h_low, h_high)
+        .triangulate(colrow, multi_ll, multi_rms);
+
+    // Two-view reference on exactly the surviving views (0 and 2).
+    zt::Tensor ref_ll;
+    zt::Tensor ref_rms;
+    RpcStereo(infos[0], infos[2], h_low, h_high)
+        .triangulate(views[0], views[2], ref_ll, ref_rms);
+
+    const double* m = multi_ll.data_ptr<double>();
+    const double* r = ref_ll.data_ptr<double>();
+    const double* mr = multi_rms.data_ptr<double>();
+    for (int64_t i = 0; i < num; ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        if (i % 3 == 0) {
+            // Only the nadir view remains: fewer than two rays -> failure.
+            EXPECT_EQ(m[3 * i], HUGE_VAL);
+            EXPECT_EQ(m[3 * i + 1], HUGE_VAL);
+            EXPECT_EQ(m[3 * i + 2], HUGE_VAL);
+            EXPECT_EQ(mr[i], HUGE_VAL);
+        } else {
+            EXPECT_NEAR(m[3 * i + 0], r[3 * i + 0], 1e-12);
+            EXPECT_NEAR(m[3 * i + 1], r[3 * i + 1], 1e-12);
+            EXPECT_NEAR(m[3 * i + 2], r[3 * i + 2], 1e-9);
+        }
+    }
+}
+
+TEST(RpcMultiStereoCpu, FewerThanTwoValidViewsFails) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(3);
+    const std::vector<Pt> pts = MakePoints(8, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+    PunchNanHoles(colrow, 1, 1, 0);
+    PunchNanHoles(colrow, 2, 1, 0);
+
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    RpcMultiStereo(
+        infos, infos[0].height_off - kRaySpanM, infos[0].height_off + kRaySpanM)
+        .triangulate(colrow, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_EQ(ll[3 * i], HUGE_VAL);
+        EXPECT_EQ(ll[3 * i + 1], HUGE_VAL);
+        EXPECT_EQ(ll[3 * i + 2], HUGE_VAL);
+        EXPECT_EQ(rm[i], HUGE_VAL);
+    }
+}
+
+// A bundle of parallel rays (three nadir views) has a rank-2 normal matrix:
+// the solve must fail and the outputs follow the GDAL failure convention.
+TEST(RpcMultiStereoCpu, ParallelBundleFails) {
+    const std::vector<RpcInfo> infos = {
+        MakeNadirInfo(), MakeNadirInfo(), MakeNadirInfo()};
+    const std::vector<Pt> pts = MakePoints(4, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    RpcMultiStereo(
+        infos, infos[0].height_off - kRaySpanM, infos[0].height_off + kRaySpanM)
+        .triangulate(colrow, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_EQ(ll[3 * i], HUGE_VAL);
+        EXPECT_EQ(ll[3 * i + 1], HUGE_VAL);
+        EXPECT_EQ(ll[3 * i + 2], HUGE_VAL);
+        EXPECT_EQ(rm[i], HUGE_VAL);
+    }
+}
+
+TEST(RpcMultiStereoCpu, ConstructorRejectsFewerThanTwoViews) {
+    EXPECT_THROW(
+        (RpcMultiStereo{std::vector<RpcInfo>{MakeNadirInfo()}, 0.0, 1.0}),
+        std::runtime_error);
+    EXPECT_THROW((RpcMultiStereo{std::vector<RpcInfo>{}, 0.0, 1.0}),
+                 std::runtime_error);
+}
+
+TEST(RpcMultiStereoCpu, ViewCountMismatchThrows) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(4);
+    const std::vector<RpcInfo> fewer = MakeMultiViewInfos(3);
+    const std::vector<Pt> pts = MakePoints(4, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(fewer, in));
+
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    EXPECT_THROW(RpcMultiStereo(infos,
+                                infos[0].height_off - kRaySpanM,
+                                infos[0].height_off + kRaySpanM)
+                     .triangulate(colrow, lonlath, rms),
+                 std::runtime_error);
+}
+
+// Float path on a realistic footprint, 4 views: the float ENU pipeline must
+// recover the ground truth to its documented budget.
+TEST(RpcMultiStereoFloatCpu, ClosedLoopRealisticFootprint) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfosRealistic(4);
+    const std::vector<Pt> pts = MakePoints(256, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    const RpcMultiStereo multi(infos,
+                               infos[0].height_off - kRaySpanM,
+                               infos[0].height_off + kRaySpanM,
+                               StereoPrecision::FloatEnu);
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    multi.triangulate(colrow, lonlath, rms);
+
+    const double* ll = lonlath.data_ptr<double>();
+    const double* rm = rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(ll[3 * i + 0], pts[i].lon, kTolFloatDeg);
+        EXPECT_NEAR(ll[3 * i + 1], pts[i].lat, kTolFloatDeg);
+        EXPECT_NEAR(ll[3 * i + 2], pts[i].alt, kTolFloatH);
+        EXPECT_LT(rm[i], kTolFloatRmsM);
+    }
+}
+
+// Float-vs-double drift tripwire on the N-view normal equations, mirroring
+// RpcStereoFloatCpu.MatchesDoublePath for the pair path.
+TEST(RpcMultiStereoFloatCpu, MatchesDoublePath) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfosRealistic(4);
+    const std::vector<Pt> pts = MakePoints(1024, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+
+    const double h_low = infos[0].height_off - kRaySpanM;
+    const double h_high = infos[0].height_off + kRaySpanM;
+    zt::Tensor ll_d;
+    zt::Tensor rms_d;
+    RpcMultiStereo(infos, h_low, h_high).triangulate(colrow, ll_d, rms_d);
+    zt::Tensor ll_f;
+    zt::Tensor rms_f;
+    RpcMultiStereo(infos, h_low, h_high, StereoPrecision::FloatEnu)
+        .triangulate(colrow, ll_f, rms_f);
+
+    const double* a = ll_d.data_ptr<double>();
+    const double* b = ll_f.data_ptr<double>();
+    const double* ra = rms_d.data_ptr<double>();
+    const double* rb = rms_f.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatVsDoubleH);
+        EXPECT_NEAR(rb[i], ra[i], kTolFloatVsDoubleRmsM);
+    }
+}
+
+// Two views through the float RpcMultiStereo path must agree with the float
+// RpcStereo path (same rays, same closed form).
+TEST(RpcMultiStereoFloatCpu, MatchesTwoViewFloatPath) {
+    const std::vector<RpcInfo> infos = {MakeNadirInfoRealistic(),
+                                        MakeObliqueInfoRealistic()};
+    const std::vector<Pt> pts = MakePoints(256, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    const std::vector<zt::Tensor> views = ForwardViews(infos, in);
+    const zt::Tensor colrow = StackViews(views);
+
+    const double h_low = infos[0].height_off - kRaySpanM;
+    const double h_high = infos[0].height_off + kRaySpanM;
+    zt::Tensor pair_ll;
+    zt::Tensor pair_rms;
+    RpcStereo(infos[0], infos[1], h_low, h_high, StereoPrecision::FloatEnu)
+        .triangulate(views[0], views[1], pair_ll, pair_rms);
+    zt::Tensor multi_ll;
+    zt::Tensor multi_rms;
+    RpcMultiStereo(infos, h_low, h_high, StereoPrecision::FloatEnu)
+        .triangulate(colrow, multi_ll, multi_rms);
+
+    const double* a = pair_ll.data_ptr<double>();
+    const double* b = multi_ll.data_ptr<double>();
+    const double* ra = pair_rms.data_ptr<double>();
+    const double* rb = multi_rms.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        SCOPED_TRACE("point " + std::to_string(i));
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatVsDoubleDeg);
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatVsDoubleH);
+        EXPECT_NEAR(rb[i], ra[i], kTolFloatVsDoubleRmsM);
+    }
+}
+
 #ifdef BUILD_CUDA_MODULE
 
 class RpcStereoCudaTest : public ::testing::Test {
@@ -735,6 +1133,101 @@ TEST_F(RpcStereoCudaTest, FloatEnuMatchesCpu) {
     for (std::size_t i = 0; i < pts.size(); ++i) {
         EXPECT_NEAR(rb[i], ra[i], kTolFloatCudaH) << "point " << i << " rms";
     }
+}
+
+// Multi-view (4 views) CUDA vs CPU, with NaN holes so a per-point varying
+// subset of views survives -- the kernels and the OpenMP loop must build the
+// identical valid-ray bundles.
+TEST_F(RpcStereoCudaTest, MultiViewMatchesCpu) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(4);
+    const std::vector<Pt> pts = MakePoints(10000, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+    // Views 0 and 3 stay complete, so every point keeps >= 2 valid views.
+    PunchNanHoles(colrow, 1, 7, 0);
+    PunchNanHoles(colrow, 2, 3, 1);
+
+    const RpcMultiStereo multi(infos,
+                               infos[0].height_off - kRaySpanM,
+                               infos[0].height_off + kRaySpanM);
+    zt::Tensor cpu_ll;
+    zt::Tensor cpu_rms;
+    multi.triangulate(colrow, cpu_ll, cpu_rms);
+
+    zt::Tensor gpu_ll;
+    zt::Tensor gpu_rms;
+    multi.triangulate(colrow.cuda(), gpu_ll, gpu_rms);
+    ASSERT_TRUE(gpu_ll.is_cuda());
+    const zt::Tensor gpu_ll_cpu = gpu_ll.cpu();
+    const zt::Tensor gpu_rms_cpu = gpu_rms.cpu();
+
+    const double* a = cpu_ll.data_ptr<double>();
+    const double* b = gpu_ll_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolCudaDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolCudaDeg)
+            << "point " << i << " lat";
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolCudaH)
+            << "point " << i << " h";
+    }
+    const double* ra = cpu_rms.data_ptr<double>();
+    const double* rb = gpu_rms_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(rb[i], ra[i], kTolCudaH) << "point " << i << " rms";
+    }
+}
+
+TEST_F(RpcStereoCudaTest, MultiViewFloatEnuMatchesCpu) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfosRealistic(4);
+    const std::vector<Pt> pts = MakePoints(10000, infos[0]);
+    zt::Tensor in = PointTensor(const_cast<std::vector<Pt>&>(pts));
+    zt::Tensor colrow = StackViews(ForwardViews(infos, in));
+    PunchNanHoles(colrow, 1, 7, 0);
+    PunchNanHoles(colrow, 2, 3, 1);
+
+    const RpcMultiStereo multi(infos,
+                               infos[0].height_off - kRaySpanM,
+                               infos[0].height_off + kRaySpanM,
+                               StereoPrecision::FloatEnu);
+    zt::Tensor cpu_ll;
+    zt::Tensor cpu_rms;
+    multi.triangulate(colrow, cpu_ll, cpu_rms);
+
+    zt::Tensor gpu_ll;
+    zt::Tensor gpu_rms;
+    multi.triangulate(colrow.cuda(), gpu_ll, gpu_rms);
+    ASSERT_TRUE(gpu_ll.is_cuda());
+    const zt::Tensor gpu_ll_cpu = gpu_ll.cpu();
+    const zt::Tensor gpu_rms_cpu = gpu_rms.cpu();
+
+    const double* a = cpu_ll.data_ptr<double>();
+    const double* b = gpu_ll_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(b[3 * i + 0], a[3 * i + 0], kTolFloatCudaDeg)
+            << "point " << i << " lon";
+        EXPECT_NEAR(b[3 * i + 1], a[3 * i + 1], kTolFloatCudaDeg)
+            << "point " << i << " lat";
+        EXPECT_NEAR(b[3 * i + 2], a[3 * i + 2], kTolFloatCudaH)
+            << "point " << i << " h";
+    }
+    const double* ra = cpu_rms.data_ptr<double>();
+    const double* rb = gpu_rms_cpu.data_ptr<double>();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_NEAR(rb[i], ra[i], kTolFloatCudaH) << "point " << i << " rms";
+    }
+}
+
+// The CUDA kernels keep the ray bundle in thread-local memory: view counts
+// beyond the cap are rejected (the CPU path has no such limit).
+TEST_F(RpcStereoCudaTest, MultiViewTooManyViewsThrows) {
+    const std::vector<RpcInfo> infos = MakeMultiViewInfos(33);
+    const RpcMultiStereo multi(infos, -50.0, 50.0);
+    zt::Tensor colrow = zt::zeros({33, 4, 2}, zt::dtype(zt::kDouble));
+    zt::Tensor lonlath;
+    zt::Tensor rms;
+    EXPECT_THROW(multi.triangulate(colrow.cuda(), lonlath, rms),
+                 std::runtime_error);
 }
 
 #endif  // BUILD_CUDA_MODULE

@@ -47,6 +47,19 @@ ZT_HOST_DEVICE inline constexpr T kParallelDenTol() noexcept {
     }
 }
 
+// Relative pivot-singularity threshold for the 3x3 normal-equation solve:
+// double keeps the tight 1e-14; float elimination noise (~1e-7 relative per
+// operation, amplified by pivoting) needs the looser 1e-5 to reject the same
+// degenerate bundles the double solve rejects.
+template<typename T>
+ZT_HOST_DEVICE inline constexpr T kSingularTol() noexcept {
+    if constexpr (sizeof(T) == 4) {
+        return T(1e-5f);
+    } else {
+        return T(1e-14);
+    }
+}
+
 // Closed-form two-ray intersection, generic over the ray/vector scalar type:
 // ONE implementation of the geometry, instantiated for Ecef/double (below)
 // and Enu/float (rpc_ray_float.hpp). The vector type only needs arithmetic
@@ -183,42 +196,43 @@ namespace detail {
 
 // Solve the symmetric 3x3 system M [x y z]^T = [r0 r1 r2]^T by Gaussian
 // elimination with partial pivoting (no BLAS needed for 3x3). Returns false
-// when M is numerically singular (rays coplanar / parallel). Identical math
-// on host and device.
-ZT_HOST_DEVICE inline bool solve3x3(double m00,
-                                    double m01,
-                                    double m02,
-                                    double m11,
-                                    double m12,
-                                    double m22,
-                                    double r0,
-                                    double r1,
-                                    double r2,
-                                    double& x,
-                                    double& y,
-                                    double& z) noexcept {
-    std::array<std::array<double, 3>, 3> a = {
-        std::array<double, 3>{m00, m01, m02},
-        std::array<double, 3>{m01, m11, m12},
-        std::array<double, 3>{m02, m12, m22}};
-    std::array<double, 3> b = {r0, r1, r2};
+// when M is numerically singular (rays coplanar / parallel). Generic over the
+// scalar type: ONE implementation for the double ECEF and float ENU paths.
+// Identical math on host and device.
+template<typename T>
+ZT_HOST_DEVICE inline bool solve3x3(T m00,
+                                    T m01,
+                                    T m02,
+                                    T m11,
+                                    T m12,
+                                    T m22,
+                                    T r0,
+                                    T r1,
+                                    T r2,
+                                    T& x,
+                                    T& y,
+                                    T& z) noexcept {
+    std::array<std::array<T, 3>, 3> a = {std::array<T, 3>{m00, m01, m02},
+                                         std::array<T, 3>{m01, m11, m12},
+                                         std::array<T, 3>{m02, m12, m22}};
+    std::array<T, 3> b = {r0, r1, r2};
 
     // Scale of the matrix, used for a relative singularity threshold.
-    double scale = 0.0;
+    T scale = 0;
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
             scale = fmax(scale, fabs(a[i][j]));
         }
     }
-    const double pivot_tol = 1e-14 * fmax(scale, 1e-300);
+    const T pivot_tol = kSingularTol<T>() * fmax(scale, T(1e-30));
 
     for (int col = 0; col < 3; ++col) {
         // Partial pivoting: swap in the row with the largest |entry| in this
         // column.
         int pivot = col;
-        double max_abs = fabs(a[col][col]);
+        T max_abs = fabs(a[col][col]);
         for (int row = col + 1; row < 3; ++row) {
-            const double v = fabs(a[row][col]);
+            const T v = fabs(a[row][col]);
             if (v > max_abs) {
                 max_abs = v;
                 pivot = row;
@@ -229,18 +243,18 @@ ZT_HOST_DEVICE inline bool solve3x3(double m00,
         }
         if (pivot != col) {
             for (int j = 0; j < 3; ++j) {
-                const double tmp = a[col][j];
+                const T tmp = a[col][j];
                 a[col][j] = a[pivot][j];
                 a[pivot][j] = tmp;
             }
-            const double tmp = b[col];
+            const T tmp = b[col];
             b[col] = b[pivot];
             b[pivot] = tmp;
         }
 
         // Eliminate below the pivot.
         for (int row = col + 1; row < 3; ++row) {
-            const double f = a[row][col] / a[col][col];
+            const T f = a[row][col] / a[col][col];
             for (int j = col; j < 3; ++j) {
                 a[row][j] -= f * a[col][j];
             }
@@ -255,81 +269,117 @@ ZT_HOST_DEVICE inline bool solve3x3(double m00,
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
 }
 
-}  // namespace detail
-
-// N-view least-squares intersection (Slabaugh normal equations):
-//   M = sum(I - d_i d_i^T),  R = sum(I - d_i d_i^T) . origin_i,  P = M^-1 R.
-// Sets `rms` to sqrt(mean perpendicular-distance^2). n >= 2. Returns false
-// if M is singular (rays coplanar / parallel).
-ZT_HOST_DEVICE inline bool triangulate_nview(const RpcRay* rays,
-                                             int n,
-                                             Ecef& p,
-                                             double& rms) noexcept {
+// Precision-generic N-view core, mirroring triangulate_pair_impl: ONE
+// implementation of the Slabaugh normal equations, instantiated for
+// Ecef/double (triangulate_nview above) and Enu/float (rpc_ray_float.hpp).
+// The vector type only needs arithmetic .x()/.y()/.z() components.
+template<typename RayT, typename Vec3, typename T>
+ZT_HOST_DEVICE inline bool triangulate_nview_impl(const RayT* rays,
+                                                  int n,
+                                                  Vec3& p,
+                                                  T& rms) noexcept {
     if (n < 2) {
         return false;
     }
     // VW switches the two-ray case to the closed form; the normal equations
     // agree with it, but the closed form is cheaper and more direct.
     if (n == 2) {
-        double err = 0.0;
-        const bool ok = triangulate_pair(rays[0], rays[1], p, err);
+        T err = 0;
+        const bool ok =
+            triangulate_pair_impl<RayT, Vec3, T>(rays[0], rays[1], p, err);
         if (ok) {
             rms = err;
         }
         return ok;
     }
 
-    // Accumulate the symmetric 3x3 normal matrix M and rhs R.
-    double m00 = 0.0;
-    double m01 = 0.0;
-    double m02 = 0.0;
-    double m11 = 0.0;
-    double m12 = 0.0;
-    double m22 = 0.0;
-    double r0 = 0.0;
-    double r1 = 0.0;
-    double r2 = 0.0;
+    // Accumulate the symmetric 3x3 normal matrix M and rhs R. The rhs is
+    // formed about a reference point c (the first ray's origin): solving for
+    // P - c keeps its entries on the bundle scale (metres) instead of the
+    // origin magnitudes (6.4e6 m ECEF / km-scale ENU), so the float solve is
+    // not amplified by cond(M) * |origin| into centimetres. The 3x3 matrix
+    // itself depends only on the directions and needs no centring.
+    const Vec3 c = rays[0].origin;
+    T m00 = 0;
+    T m01 = 0;
+    T m02 = 0;
+    T m11 = 0;
+    T m12 = 0;
+    T m22 = 0;
+    T r0 = 0;
+    T r1 = 0;
+    T r2 = 0;
     for (int i = 0; i < n; ++i) {
-        const double a = rays[i].dir.x();
-        const double b = rays[i].dir.y();
-        const double c = rays[i].dir.z();
-        const double x = rays[i].origin.x();
-        const double y = rays[i].origin.y();
-        const double z = rays[i].origin.z();
-        m00 += 1.0 - (a * a);
+        const T a = rays[i].dir.x();
+        const T b = rays[i].dir.y();
+        const T cc = rays[i].dir.z();
+        const T x = rays[i].origin.x() - c.x();
+        const T y = rays[i].origin.y() - c.y();
+        const T z = rays[i].origin.z() - c.z();
+        m00 += 1 - (a * a);
         m01 += -(a * b);
-        m02 += -(a * c);
-        m11 += 1.0 - (b * b);
-        m12 += -(b * c);
-        m22 += 1.0 - (c * c);
-        r0 += ((1.0 - (a * a)) * x) - (a * b * y) - (a * c * z);
-        r1 += -(a * b * x) + ((1.0 - (b * b)) * y) - (b * c * z);
-        r2 += -(a * c * x) - (b * c * y) + ((1.0 - (c * c)) * z);
+        m02 += -(a * cc);
+        m11 += 1 - (b * b);
+        m12 += -(b * cc);
+        m22 += 1 - (cc * cc);
+        r0 += ((1 - (a * a)) * x) - (a * b * y) - (a * cc * z);
+        r1 += -(a * b * x) + ((1 - (b * b)) * y) - (b * cc * z);
+        r2 += -(a * cc * x) - (b * cc * y) + ((1 - (cc * cc)) * z);
     }
 
-    double px = 0.0;
-    double py = 0.0;
-    double pz = 0.0;
-    if (!detail::solve3x3(
-            m00, m01, m02, m11, m12, m22, r0, r1, r2, px, py, pz)) {
+    T dx = 0;
+    T dy = 0;
+    T dz = 0;
+    if (!solve3x3(m00, m01, m02, m11, m12, m22, r0, r1, r2, dx, dy, dz)) {
         return false;
     }
-    p = Ecef{px, py, pz};
+    p = Vec3{c.x() + dx, c.y() + dy, c.z() + dz};
 
     // RMS of the perpendicular residuals: perp_i = (I - d_i d_i^T)(P - o_i),
-    // |perp_i|^2 = |P - o_i|^2 - (d_i . (P - o_i))^2.
+    // |perp_i|^2 = |P - o_i|^2 - (d_i . (P - o_i))^2. Two accuracy guards,
+    // both invisible on the double path (already exact there):
+    //   * the directions are renormalized in double: the float path's unit
+    //     directions carry a ~6e-8 norm rounding, and (d.u)^2 turns that
+    //     into 2*eps*|u|^2 ~ 4e-3 m^2 of fake residual at scene-scale |u|
+    //     (hundreds of metres) -- a phantom ~6 cm miss;
+    //   * the accumulation itself runs in double: |u|^2 and (d.u)^2 cancel
+    //     heavily for near-intersecting bundles, which float would quantize
+    //     at the centimetre level. (The float two-ray miss distance is a
+    //     direct closest-point difference and needs no such guards.)
     double sum_sq = 0.0;
     for (int i = 0; i < n; ++i) {
-        const double dx = p.x() - rays[i].origin.x();
-        const double dy = p.y() - rays[i].origin.y();
-        const double dz = p.z() - rays[i].origin.z();
-        const double v = (rays[i].dir.x() * dx) + (rays[i].dir.y() * dy) +
-                         (rays[i].dir.z() * dz);
-        const double dist_sq = ((dx * dx) + (dy * dy) + (dz * dz)) - (v * v);
+        const double ux = static_cast<double>(p.x()) -
+                          static_cast<double>(rays[i].origin.x());
+        const double uy = static_cast<double>(p.y()) -
+                          static_cast<double>(rays[i].origin.y());
+        const double uz = static_cast<double>(p.z()) -
+                          static_cast<double>(rays[i].origin.z());
+        const double dx = static_cast<double>(rays[i].dir.x());
+        const double dy = static_cast<double>(rays[i].dir.y());
+        const double dz = static_cast<double>(rays[i].dir.z());
+        const double dn = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+        const double v = ((dx * ux) + (dy * uy) + (dz * uz)) / dn;
+        const double dist_sq = ((ux * ux) + (uy * uy) + (uz * uz)) - (v * v);
         sum_sq += (dist_sq > 0.0) ? dist_sq : 0.0;
     }
-    rms = sqrt(sum_sq / static_cast<double>(n));
+    rms = static_cast<T>(sqrt(sum_sq / static_cast<double>(n)));
     return true;
+}
+
+}  // namespace detail
+
+// N-view least-squares intersection (Slabaugh normal equations):
+//   M = sum(I - d_i d_i^T),  R = sum(I - d_i d_i^T) . origin_i,  P = M^-1 R.
+// Sets `rms` to sqrt(mean perpendicular-distance^2). n >= 2. Returns false
+// if M is singular (rays coplanar / parallel). Double wrapper over the
+// precision-generic detail::triangulate_nview_impl, which is shared with the
+// float ENU path.
+ZT_HOST_DEVICE inline bool triangulate_nview(const RpcRay* rays,
+                                             int n,
+                                             Ecef& p,
+                                             double& rms) noexcept {
+    return detail::triangulate_nview_impl<RpcRay, Ecef, double>(
+        rays, n, p, rms);
 }
 
 }  // namespace zproj::crs

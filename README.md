@@ -165,6 +165,14 @@ pixel pair through the analytic inverse at two heights to build viewing rays
 error metric -- the same ray/intersection math as ASP / VisionWorkbench,
 shared host/device with CPU + CUDA paths (`tests/test_triangulation.cpp`).
 
+Multi-view triangulation (`zproj::crs::RpcMultiStereo`) generalizes the pair
+path to V >= 2 overlapping RPC images (ASP's `RPCStereoModel` semantics): a
+`[V, N, 2]` tensor of per-view pixels -- a non-finite pixel marks an
+unobserved view and is skipped -- is intersected per point by the Slabaugh
+normal equations (the 2-valid-view case takes the closed form), on CPU
+(OpenMP, any V) and CUDA (up to 32 views), in both the double and float-ENU
+precision paths (`examples/nview_triangulation`).
+
 The convenience `wgs84_to_ecef()` wrapper currently shows ~1× vs the CPU
 reference because the single launch is dominated by `cudaMalloc` + H2D/D2H
 copies + synchronization, not the kernel itself — the natural next step is to

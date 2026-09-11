@@ -10,6 +10,8 @@
 // directions and accumulate in the intersection point.
 #pragma once
 
+#include <vector>
+
 #include "zproj/crs/rpc.hpp"
 #include "zproj/crs/rpc_ray_float.hpp"
 #include "ztensor/zt/Tensor.h"
@@ -68,6 +70,67 @@ private:
     RpcInverseInitFloat left_init_float_;
     RpcInverseInitFloat right_init_float_;
     EnuFrame enu_frame_;
+};
+
+// N-view RPC multi-stereo triangulation (V >= 2): the multi-image
+// generalization of RpcStereo above, mirroring ASP's RPCStereoModel /
+// VisionWorkbench's StereoModel::triangulate_point. Each view contributes a
+// viewing ray (same two-height analytic back-projection as the two-view
+// path); the rays are intersected in the least-squares sense by the Slabaugh
+// normal equations (triangulate_nview), with the two-valid-view case
+// delegating to the closed form exactly like the pair path.
+//
+// A view that does not observe a point marks it with a non-finite pixel
+// (NaN/Inf in either component of colrow[v, k, :]) and is skipped for that
+// point, following VW StereoModel's NaN-pixel filtering; at least two valid
+// views per point are required. Failed points (fewer than two valid rays,
+// non-convergent inverses leaving < 2 rays, parallel/singular ray bundle)
+// follow the GDAL convention: HUGE_VAL in every output element.
+//
+// The CUDA path stages the per-view model parameters in device memory; that
+// buffer holds at most 32 views, a limit the CPU path does not have.
+class RpcMultiStereo {
+public:
+    // infos: V >= 2 RPC models, all observing the same points.
+    RpcMultiStereo(std::vector<RpcInfo> infos,
+                   double h_low,
+                   double h_high,
+                   StereoPrecision precision = StereoPrecision::Double);
+
+    // colrow  : [V, N, 2] double -- (col, row) of view v for point k, the
+    //           rows matching the constructor's model order
+    // lonlath : [N, 3] (lon deg, lat deg, h m)   -- may be empty, allocated
+    //                                                here on the input device
+    // rms     : [N]   (metres)                   -- may be empty, allocated
+    //                                                here on the input device
+    void triangulate(const zt::Tensor& colrow,
+                     zt::Tensor& lonlath,
+                     zt::Tensor& rms) const;
+
+    int num_views() const noexcept { return num_views_; }
+    StereoPrecision precision() const noexcept { return precision_; }
+
+private:
+    std::vector<RpcInfo> infos_;  // view order == input tensor rows
+    std::vector<RpcInverseInit> inits_;
+    int num_views_;
+    double h_low_;
+    double h_high_;
+    StereoPrecision precision_;
+
+    // Float-path precomputations (built alongside; used only for FloatEnu).
+    std::vector<RpcInfoFloat> infos_float_;
+    std::vector<RpcInverseInitFloat> inits_float_;
+    EnuFrame enu_frame_;
+
+    // Lazily-uploaded device blobs of infos_/inits_ (kByte tensors; cached
+    // for the object's lifetime so an in-flight kernel never races the
+    // allocator's free, and rebuilt when inputs arrive on another device).
+    // Not guarded for concurrent first calls from multiple threads.
+    mutable zt::Tensor infos_dev_;
+    mutable zt::Tensor inits_dev_;
+    mutable zt::Tensor infos_float_dev_;
+    mutable zt::Tensor inits_float_dev_;
 };
 
 }  // namespace zproj::crs

@@ -11,14 +11,15 @@
 // holds sub-millimetre precision.
 //
 // SINGLE SOURCE OF TRUTH: this header adds NO duplicated solver math. The
-// Newton iteration, the polynomial terms, the quotient-rule Jacobian, and
-// the two-ray intersection are the precision-templated implementations in
-// rpc.hpp (rpc_compute_terms, detail::rpc_jac_coeffs,
-// detail::rpc_newton_inverse_core) and rpc_ray.hpp
-// (detail::triangulate_pair_impl), instantiated for float here. Only the
-// float-specific scaffolding lives in this file: the coefficient mirror,
-// the offset-relative seed (with the same +/-270 deg dateline wrap as the
-// double inverse), the ENU frame, and the geodetic <-> ENU narrowing.
+// Newton iteration, the polynomial terms, the quotient-rule Jacobian, the
+// two-ray intersection and the N-view normal equations are the
+// precision-templated implementations in rpc.hpp (rpc_compute_terms,
+// detail::rpc_jac_coeffs, detail::rpc_newton_inverse_core) and rpc_ray.hpp
+// (detail::triangulate_pair_impl, detail::triangulate_nview_impl /
+// detail::solve3x3), instantiated for float here. Only the float-specific
+// scaffolding lives in this file: the coefficient mirror, the offset-relative
+// seed (with the same +/-270 deg dateline wrap as the double inverse), the
+// ENU frame, and the geodetic <-> ENU narrowing.
 //
 // Accuracy budget (measured, 5 km footprint, GSD 0.1 m): horizontal ~1 mm,
 // height ~2 cm, ray rms ~1.5 mm -- the same order as the double path's
@@ -139,15 +140,12 @@ inline RpcInverseInitFloat MakeRpcInverseInitFloat(const RpcInfo& info,
     return f;
 }
 
-// ENU frame centred between the two models' offset points (the overlap
-// region of a stereo pair). The origin and basis stay double: they carry the
-// 6.4e6 m ECEF magnitudes that float cannot hold. Valid at any longitude,
-// including dateline-crossing scenes (the frame is purely local).
-inline EnuFrame MakeEnuFrame(const RpcInfo& left, const RpcInfo& right) {
-    const double lon = 0.5 * (left.long_off + right.long_off) * kDegToRad;
-    const double lat = 0.5 * (left.lat_off + right.lat_off) * kDegToRad;
-    const double h = 0.5 * (left.height_off + right.height_off);
+namespace detail {
 
+// ENU frame at a geodetic position (angles in RADIANS, height in metres):
+// double ECEF origin + east/north/up basis. Shared by the two-view and
+// N-view MakeEnuFrame overloads so the frame construction cannot drift.
+inline EnuFrame MakeEnuFrameAtLonLat(double lon, double lat, double h) {
     EnuFrame frame;
     frame.p0 = to_ecef(Geodetic{lon, lat, h});
     const double sin_lon = sin(lon);
@@ -158,6 +156,35 @@ inline EnuFrame MakeEnuFrame(const RpcInfo& left, const RpcInfo& right) {
     frame.north = Ecef{-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat};
     frame.up = Ecef{cos_lat * cos_lon, cos_lat * sin_lon, sin_lat};
     return frame;
+}
+
+}  // namespace detail
+
+// ENU frame centred between the two models' offset points (the overlap
+// region of a stereo pair). The origin and basis stay double: they carry the
+// 6.4e6 m ECEF magnitudes that float cannot hold. Valid at any longitude,
+// including dateline-crossing scenes (the frame is purely local).
+inline EnuFrame MakeEnuFrame(const RpcInfo& left, const RpcInfo& right) {
+    const double lon = 0.5 * (left.long_off + right.long_off) * kDegToRad;
+    const double lat = 0.5 * (left.lat_off + right.lat_off) * kDegToRad;
+    const double h = 0.5 * (left.height_off + right.height_off);
+    return detail::MakeEnuFrameAtLonLat(lon, lat, h);
+}
+
+// ENU frame centred at the mean of N models' offset points (the overlap
+// region of a multi-view set), generalizing the two-view frame above.
+inline EnuFrame MakeEnuFrame(const RpcInfo* infos, int num_views) {
+    double lon_deg = 0.0;
+    double lat_deg = 0.0;
+    double h = 0.0;
+    for (int i = 0; i < num_views; ++i) {
+        lon_deg += infos[i].long_off;
+        lat_deg += infos[i].lat_off;
+        h += infos[i].height_off;
+    }
+    const double n = static_cast<double>(num_views);
+    return detail::MakeEnuFrameAtLonLat(
+        lon_deg * kDegToRad / n, lat_deg * kDegToRad / n, h / n);
 }
 
 // ECEF -> ENU (float): the subtraction and projection run in double, only
@@ -330,6 +357,19 @@ ZT_HOST_DEVICE inline bool triangulate_pair(const RpcRayEnu& a,
                                             Enu& p,
                                             float& err) noexcept {
     return detail::triangulate_pair_impl(a, b, p, err);
+}
+
+// N-view least-squares intersection in the ENU frame (float): Slabaugh normal
+// equations, the float instantiation of the SAME solver as the double path's
+// triangulate_nview (detail::triangulate_nview_impl). Sets `rms` to
+// sqrt(mean perpendicular-distance^2). n >= 2; returns false if the normal
+// matrix is singular.
+ZT_HOST_DEVICE inline bool triangulate_nview(const RpcRayEnu* rays,
+                                             int n,
+                                             Enu& p,
+                                             float& rms) noexcept {
+    return detail::triangulate_nview_impl<RpcRayEnu, Enu, float>(
+        rays, n, p, rms);
 }
 
 }  // namespace zproj::crs
