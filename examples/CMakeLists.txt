@@ -45,4 +45,11 @@ target_link_libraries(nview_triangulation PRIVATE zproj)
 if(TARGET zproj::refine)
     add_executable(rpc_affine rpc_affine/main.cpp)
     target_link_libraries(rpc_affine PRIVATE zproj zproj::refine)
+
+    # Multi-view (N >= 2) RPC bundle adjustment demo (Ceres): recover known
+    # per-view affine corruptions of a synthetic multi-view network from
+    # noisy tie points with outliers and partial visibility, then show the
+    # ground accuracy of N-view triangulation before/after the correction.
+    add_executable(rpc_bundle_adjust rpc_bundle_adjust/main.cpp)
+    target_link_libraries(rpc_bundle_adjust PRIVATE zproj zproj::refine)
 endif()

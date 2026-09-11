@@ -2,129 +2,36 @@
 // (see rpc_affine.hpp for the model and formulation).
 //
 // The problem is a miniature bundle adjustment in the style of ASP's
-// BaReprojErr: per-image affine blocks (6 or fewer free parameters each,
-// restricted through SubsetManifold by RpcAffineDoF), one free ground block
-// per stereo match initialized by ray triangulation, constant ground blocks
-// for GCPs, and 2-residual reprojection costs that evaluate only the forward
-// RPC -- a smooth rational polynomial, so autodiff derivatives are exact.
+// BaReprojErr cost: per-image affine blocks (6 or fewer free parameters
+// each, restricted through SubsetManifold by RpcAffineDoF), one free ground
+// block per stereo match initialized by ray triangulation, constant ground
+// blocks for GCPs, and 2-residual reprojection costs that evaluate only the
+// forward RPC -- a smooth rational polynomial, so autodiff derivatives are
+// exact. The cost functors and solve tail are shared with the N-view
+// bundle adjustment (rpc_bundle_adjust.cpp) through rpc_affine_detail.h.
 #include "zproj/crs/rpc_affine.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <memory>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "zproj/crs/wgs84.hpp"
 
-#include <ceres/ceres.h>
+#include "rpc_affine_detail.h"
 
 namespace zproj::crs {
 namespace {
 
-// Identity parameter block, the prior's target.
-constexpr std::array<double, 6> kAffineIdentity{0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-
-// Reprojection cost: projects one ground block (lon deg, lat deg, h m)
-// through one image's RPC and affine, and compares against the observed
-// pixel. Residuals in units of pixel_sigma. Forward evaluation only.
-//
-// Holds a POINTER to the shared RpcInfo instead of a copy: at 1e5 matches
-// there are 2e5 of these functors, and 80 copied coefficients each would
-// waste ~130 MB. The pointee (the caller's RpcInfo, passed by reference
-// into solve_rpc_affine) outlives the ceres::Problem.
-//
-// `mirror` implements the zero-mean constraint: the affine applied is
-// 2*identity - `affine`, i.e. the right image's block is parameterized as
-// the mirror of the left's, so the two affines' MEAN is exactly the
-// identity without any soft-constraint weight tuning.
-struct ReprojError {
-    ReprojError(const RpcInfo* info,
-                double obs_col,
-                double obs_row,
-                double pixel_sigma,
-                bool mirror = false)
-        : info_(info), obs_col_(obs_col), obs_row_(obs_row), mirror_(mirror) {
-        inv_sigma_ = 1.0 / ((pixel_sigma > 0.0) ? pixel_sigma : 1.0);
-    }
-
-    template<typename T>
-    bool operator()(const T* const affine,
-                    const T* const lonlath,
-                    T* residuals) const {
-        T col;
-        T row;
-        detail::rpc_forward_point_core(
-            *info_, lonlath[0], lonlath[1], lonlath[2], col, row);
-        const T e0 =
-            mirror_ ? (T(2.0 * kAffineIdentity[0]) - affine[0]) : affine[0];
-        const T e1 =
-            mirror_ ? (T(2.0 * kAffineIdentity[1]) - affine[1]) : affine[1];
-        const T e2 =
-            mirror_ ? (T(2.0 * kAffineIdentity[2]) - affine[2]) : affine[2];
-        const T f0 =
-            mirror_ ? (T(2.0 * kAffineIdentity[3]) - affine[3]) : affine[3];
-        const T f1 =
-            mirror_ ? (T(2.0 * kAffineIdentity[4]) - affine[4]) : affine[4];
-        const T f2 =
-            mirror_ ? (T(2.0 * kAffineIdentity[5]) - affine[5]) : affine[5];
-        const T corr_col = e0 + (e1 * col) + (e2 * row);
-        const T corr_row = f0 + (f1 * col) + (f2 * row);
-        residuals[0] = (corr_col - T(obs_col_)) * T(inv_sigma_);
-        residuals[1] = (corr_row - T(obs_row_)) * T(inv_sigma_);
-        return true;
-    }
-
-    const RpcInfo* info_;
-    double obs_col_;
-    double obs_row_;
-    double inv_sigma_;
-    bool mirror_;
-};
-
-ceres::CostFunction* MakeReprojCost(const RpcInfo& info,
-                                    double obs_col,
-                                    double obs_row,
-                                    double pixel_sigma,
-                                    bool mirror = false) {
-    return new ceres::AutoDiffCostFunction<ReprojError, 2, 6, 3>(
-        new ReprojError(&info, obs_col, obs_row, pixel_sigma, mirror));
-}
-
-// Tikhonov prior on one affine block: residuals = w * (p - identity).
-struct AffinePrior {
-    explicit AffinePrior(double weight) : weight_(weight) {}
-
-    template<typename T>
-    bool operator()(const T* const affine, T* residuals) const {
-        for (int i = 0; i < 6; ++i) {
-            residuals[i] = T(weight_) * (affine[i] - T(kAffineIdentity[i]));
-        }
-        return true;
-    }
-
-    double weight_;
-};
-
-// Parameter-block layout [e0, e1, e2, f0, f1, f2]; held-constant indices per
-// RpcAffineDoF. Null for Full (no manifold).
-std::unique_ptr<ceres::Manifold> MakeAffineManifold(RpcAffineDoF dof) {
-    switch (dof) {
-        case RpcAffineDoF::Translation:
-            return std::make_unique<ceres::SubsetManifold>(
-                6, std::vector<int>{1, 2, 4, 5});
-        case RpcAffineDoF::TranslationScale:
-            return std::make_unique<ceres::SubsetManifold>(
-                6, std::vector<int>{2, 5});
-        case RpcAffineDoF::Full:
-            return nullptr;
-    }
-    return nullptr;
-}
+using refine_detail::AffinePrior;
+using refine_detail::kAffineIdentity;
+using refine_detail::MakeAffineManifold;
+using refine_detail::MakeReprojCost;
+using refine_detail::NewLoss;
+using refine_detail::ResidualSq;
 
 // The mirrored affine (2*identity - p), used for the right image when
 // zero_mean_affines is on.
@@ -134,34 +41,6 @@ std::array<double, 6> MirrorAffine(const std::array<double, 6>& p) {
         out[i] = 2.0 * kAffineIdentity[i] - p[i];
     }
     return out;
-}
-
-// Loss function factory: Ceres' Problem takes ownership of each residual
-// block's loss function, so a FRESH instance must be handed to every
-// AddResidualBlock. Null return disables the robust loss.
-ceres::LossFunction* NewLoss(const RpcAffineOptions& o) {
-    if (o.robust_threshold_px <= 0.0) {
-        return nullptr;
-    }
-    // Residuals are already normalized by pixel_sigma, so divide the pixel
-    // threshold by the same sigma to keep its pixel meaning.
-    const double sigma = (o.pixel_sigma > 0.0) ? o.pixel_sigma : 1.0;
-    return new ceres::HuberLoss(o.robust_threshold_px / sigma);
-}
-
-// One observation's squared reprojection error, evaluated outside Ceres (for
-// the before/after RMS in the report). `aff` is a 6-block, `lonlath` a 3-block.
-double ResidualSq(const RpcInfo& info,
-                  const double* aff,
-                  const double* lonlath,
-                  double obs_col,
-                  double obs_row) {
-    double col = 0.0;
-    double row = 0.0;
-    rpc_forward_point(info, lonlath[0], lonlath[1], lonlath[2], col, row);
-    const double rc = aff[0] + (aff[1] * col) + (aff[2] * row) - obs_col;
-    const double rr = aff[3] + (aff[4] * col) + (aff[5] * row) - obs_row;
-    return (rc * rc) + (rr * rr);
 }
 
 // RMS over every scalar residual component (2 per observation): matches in
@@ -204,46 +83,6 @@ double ReprojectionRms(const RpcInfo& left,
     AccumGcps(left, left_gcps, left_aff);
     AccumGcps(right, right_gcps, right_aff);
     return (n_res > 0) ? std::sqrt(sum / static_cast<double>(n_res)) : 0.0;
-}
-
-// Shared solve tail: runs Levenberg-Marquardt and, when Ceres returns a
-// usable solution, copies each affine block into its caller-facing RpcAffine.
-// `linear_solver_type` is chosen by the caller: DENSE_SCHUR for the two-view
-// problem (see below), DENSE_QR for the tiny GCP-only problem.
-RpcAffineReport SolveAndReport(
-    ceres::Problem& problem,
-    const RpcAffineOptions& options,
-    ceres::LinearSolverType linear_solver_type,
-    const std::vector<std::pair<double*, RpcAffine*>>& affine_blocks) {
-    ceres::Solver::Options solver_options;
-    // The two-view problem has classic bundle-adjustment sparsity: a handful
-    // of affine blocks ("cameras") and one 3-parameter ground block per
-    // match ("points"), every residual touching one of each. DENSE_QR
-    // factorizes the full (4N) x (12 + 3N) Jacobian -- O(N^3), minutes at
-    // N ~ 1e3 and impossible at 1e5. DENSE_SCHUR eliminates the ground
-    // blocks and solves the <= 12 x 12 reduced affine system instead: O(N)
-    // per iteration.
-    solver_options.linear_solver_type = linear_solver_type;
-    solver_options.max_num_iterations =
-        (options.max_iterations > 0) ? options.max_iterations : 1;
-    solver_options.num_threads =
-        (options.num_threads > 0)
-            ? options.num_threads
-            : std::max(1u, std::thread::hardware_concurrency());
-    solver_options.minimizer_progress_to_stdout = options.verbose;
-
-    ceres::Solver::Summary summary;
-    ceres::Solve(solver_options, &problem, &summary);
-
-    RpcAffineReport report;
-    report.ok = summary.IsSolutionUsable();
-    report.message = summary.BriefReport();
-    if (report.ok) {
-        for (const auto& [block, out] : affine_blocks) {
-            std::copy(block, block + 6, out->p.begin());
-        }
-    }
-    return report;
 }
 
 // Ground-block initialization for one match: back-project both
@@ -423,17 +262,18 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
         problem.AddResidualBlock(
             MakeReprojCost(
                 left, used[i].left_col, used[i].left_row, options.pixel_sigma),
-            NewLoss(options),
+            NewLoss(options.robust_threshold_px, options.pixel_sigma),
             la.data(),
             ground[i].data());
-        problem.AddResidualBlock(MakeReprojCost(right,
-                                                used[i].right_col,
-                                                used[i].right_row,
-                                                options.pixel_sigma,
-                                                zero_mean),
-                                 NewLoss(options),
-                                 right_block,
-                                 ground[i].data());
+        problem.AddResidualBlock(
+            MakeReprojCost(right,
+                           used[i].right_col,
+                           used[i].right_row,
+                           options.pixel_sigma,
+                           zero_mean),
+            NewLoss(options.robust_threshold_px, options.pixel_sigma),
+            right_block,
+            ground[i].data());
     }
 
     // GCP observations: constant ground blocks (the ground coordinates ARE
@@ -450,7 +290,7 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
             problem.SetParameterBlockConstant(gcp_ground.back().data());
             problem.AddResidualBlock(
                 MakeReprojCost(info, g.col, g.row, options.pixel_sigma, mirror),
-                NewLoss(options),
+                NewLoss(options.robust_threshold_px, options.pixel_sigma),
                 aff,
                 gcp_ground.back().data());
         }
@@ -500,8 +340,18 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
     if (!zero_mean) {
         affine_blocks.emplace_back(ra.data(), &right_affine);
     }
+    // The problem has classic bundle-adjustment sparsity: a handful of
+    // affine blocks ("cameras") and one 3-parameter ground block per match
+    // ("points"), every residual touching one of each. DENSE_SCHUR
+    // eliminates the ground blocks and solves the <= 12 x 12 reduced affine
+    // system instead: O(N) per iteration.
     RpcAffineReport solved =
-        SolveAndReport(problem, options, ceres::DENSE_SCHUR, affine_blocks);
+        refine_detail::SolveAndReport(problem,
+                                      options.max_iterations,
+                                      options.num_threads,
+                                      options.verbose,
+                                      ceres::DENSE_SCHUR,
+                                      affine_blocks);
     if (zero_mean) {
         ra = MirrorAffine(la);
         if (solved.ok) {
@@ -559,7 +409,7 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& info,
         problem.SetParameterBlockConstant(gcp_ground.back().data());
         problem.AddResidualBlock(
             MakeReprojCost(info, g.col, g.row, options.pixel_sigma),
-            NewLoss(options),
+            NewLoss(options.robust_threshold_px, options.pixel_sigma),
             a.data(),
             gcp_ground.back().data());
     }
@@ -582,8 +432,13 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& info,
 
     // No free ground blocks here, so there is nothing for a Schur solver to
     // eliminate; the plain dense QR is the right (and fastest) choice.
-    RpcAffineReport solved = SolveAndReport(
-        problem, options, ceres::DENSE_QR, {{a.data(), &affine}});
+    RpcAffineReport solved =
+        refine_detail::SolveAndReport(problem,
+                                      options.max_iterations,
+                                      options.num_threads,
+                                      options.verbose,
+                                      ceres::DENSE_QR,
+                                      {{a.data(), &affine}});
     solved.num_gcps = static_cast<int>(gcps.size());
     solved.rms_before_px = rms_before;
 

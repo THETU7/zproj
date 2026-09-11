@@ -19,8 +19,7 @@
 // solve_rpc_affine() is a miniature bundle adjustment in the style of ASP's
 // BaReprojErr cost: every stereo match gets a free ground block
 // (lon deg, lat deg, h m) initialized by ray triangulation with the current
-// affines, and the residuals run through the FORWARD RPC only
-//
+// affines, and the residuals run through the FORWARD RPC only//
 //     r = affine(rpc_forward(ground)) - observed_pixel            [pixels]
 //
 // -- never the iterative inverse, so the whole residual graph is a smooth
@@ -45,7 +44,8 @@
 // The solver lives in the zproj_refine library (Ceres, CPU): a per-scene
 // problem of 2 x <=6 affine parameters plus 3 per match, solved once. The
 // per-point math that is hot at pixel scale stays in rpc.hpp / rpc_ray.hpp
-// (host/device shared).
+// (host/device shared). solve_rpc_bundle_adjust() (rpc_bundle_adjust.hpp)
+// generalizes the same formulation to N views over a control network.
 #pragma once
 
 #include <array>

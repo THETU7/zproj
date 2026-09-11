@@ -243,7 +243,10 @@ option(ZPROJ_BUILD_RPC_REFINE
        "Build the Ceres-based RPC affine refinement library (zproj_refine)" ON)
 if(ZPROJ_BUILD_RPC_REFINE)
     find_package(Ceres 2.2 CONFIG REQUIRED)
-    add_library(zproj_refine STATIC src/crs/rpc_affine.cpp)
+    add_library(zproj_refine STATIC
+        src/crs/rpc_affine.cpp
+        src/crs/rpc_bundle_adjust.cpp
+    )
     add_library(zproj::refine ALIAS zproj_refine)
     target_link_libraries(zproj_refine
         PUBLIC

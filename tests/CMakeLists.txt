@@ -38,4 +38,11 @@ if(TARGET zproj::refine)
     target_link_libraries(test_rpc_affine PRIVATE zproj zproj::refine GTest::gtest)
     include(GoogleTest)
     gtest_discover_tests(test_rpc_affine)
+
+    # N-view RPC bundle adjustment (Ceres): control-network corruption
+    # recovery, partial visibility, gauge constraints, GCP anchoring.
+    add_executable(test_rpc_bundle_adjust test_rpc_bundle_adjust.cpp)
+    target_link_libraries(test_rpc_bundle_adjust PRIVATE zproj zproj::refine GTest::gtest)
+    include(GoogleTest)
+    gtest_discover_tests(test_rpc_bundle_adjust)
 endif()
