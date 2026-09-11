@@ -3,10 +3,10 @@
 // the gauge handling and the observability caveats).
 //
 // The corrections travel as RpcAffineBanded objects (one per scene, in and
-// out); internally the solve unpacks them into flat block storage --
-// aff_blocks[s] for the scene affine, shift_blocks[band_offset[s] + i] for
-// local band i -- and writes the solved values back through the objects'
-// mutators on success.
+// out); internally the solve unpacks them into per-scene SceneParams (the
+// affine block, the band structure the object came with, and the free +
+// derived shift blocks in local-band order) and writes the solved values
+// back through the objects' mutators on success.
 //
 // The parameter structure is expressed with ONE generic dynamic-autodiff
 // cost: every quantity the residual evaluates is an affine (linear)
@@ -165,6 +165,20 @@ struct ShiftPrior {
     double weight_;
 };
 
+// Per-scene solve storage: everything one scene contributes, in LOCAL band
+// order (the caller's object stores bands sorted by ascending center, so
+// local band count-1 is the highest-center -- derived -- band). The
+// containers are sized once and only their elements mutate afterwards, so
+// the parameter blocks taken from them stay address-stable through the
+// solve.
+struct SceneParams {
+    std::array<double, 6> aff;  // the scene affine block
+    RpcAffineBandBasis basis = RpcAffineBandBasis::Linear;
+    std::vector<std::array<double, 2>> shift;  // [i]: local band i's block
+    std::vector<std::array<double, 2>> range;  // [i]: (row_lo, row_hi)
+    std::vector<double> center;                // [i]: band center, ascending
+};
+
 }  // namespace
 
 RpcBaReport solve_rpc_bundle_adjust_banded(
@@ -185,37 +199,23 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         return report;
     }
 
-    // ---- Unpack the scene corrections into flat solve storage -----------
-    // Scene s's local band i lives at shift_blocks[band_offset[s] + i];
-    // band_ranges holds the (row_lo, row_hi) the objects came with. The
-    // class stores bands sorted by ascending center, so local band
-    // count-1 is each scene's highest-center (derived) band.
-    std::vector<int> band_offset(static_cast<std::size_t>(num_scenes), 0);
-    std::vector<int> band_count(static_cast<std::size_t>(num_scenes), 0);
-    std::vector<RpcAffineBandBasis> scene_basis(
-        static_cast<std::size_t>(num_scenes));
-    std::vector<std::array<double, 6>> aff_blocks(
-        static_cast<std::size_t>(num_scenes));
-    int num_bands = 0;
+    // ---- Unpack the scene corrections into solve storage -----------------
+    std::vector<SceneParams> scene_params(static_cast<std::size_t>(num_scenes));
     for (int s = 0; s < num_scenes; ++s) {
         const RpcAffineBanded& obj = corrected[static_cast<std::size_t>(s)];
-        band_offset[static_cast<std::size_t>(s)] = num_bands;
-        band_count[static_cast<std::size_t>(s)] = obj.num_bands();
-        num_bands += obj.num_bands();
-        scene_basis[static_cast<std::size_t>(s)] = obj.basis();
-        aff_blocks[static_cast<std::size_t>(s)] = obj.affine().p;
-    }
-    std::vector<std::array<double, 2>> shift_blocks(
-        static_cast<std::size_t>(num_bands));
-    std::vector<std::array<double, 2>> band_ranges(
-        static_cast<std::size_t>(num_bands));
-    for (int s = 0; s < num_scenes; ++s) {
-        const RpcAffineBanded& obj = corrected[static_cast<std::size_t>(s)];
-        for (int i = 0; i < band_count[static_cast<std::size_t>(s)]; ++i) {
-            const std::size_t g = static_cast<std::size_t>(
-                band_offset[static_cast<std::size_t>(s)] + i);
-            shift_blocks[g] = {obj.band(i).dx, obj.band(i).dy};
-            band_ranges[g] = {obj.band(i).row_lo, obj.band(i).row_hi};
+        SceneParams& sp = scene_params[static_cast<std::size_t>(s)];
+        sp.aff = obj.affine().p;
+        sp.basis = obj.basis();
+        sp.shift.resize(static_cast<std::size_t>(obj.num_bands()));
+        sp.range.resize(static_cast<std::size_t>(obj.num_bands()));
+        sp.center.resize(static_cast<std::size_t>(obj.num_bands()));
+        for (int i = 0; i < obj.num_bands(); ++i) {
+            sp.shift[static_cast<std::size_t>(i)] = {obj.band(i).dx,
+                                                     obj.band(i).dy};
+            sp.range[static_cast<std::size_t>(i)] = {obj.band(i).row_lo,
+                                                     obj.band(i).row_hi};
+            sp.center[static_cast<std::size_t>(i)] =
+                0.5 * (obj.band(i).row_lo + obj.band(i).row_hi);
         }
     }
     const bool zero_mean = options.zero_mean_affines;
@@ -228,33 +228,27 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     // scene without bands contributes no terms (plain affine scene).
     const auto BandTerms = [&](int scene, double row) {
         std::vector<std::pair<int, double>> terms;
-        const int count = band_count[static_cast<std::size_t>(scene)];
+        const SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
+        const int count = static_cast<int>(sp.shift.size());
         if (count == 0) {
             return terms;
         }
-        const std::size_t off = static_cast<std::size_t>(
-            band_offset[static_cast<std::size_t>(scene)]);
-        const auto Center = [&](int i) {
-            const auto& r = band_ranges[off + static_cast<std::size_t>(i)];
-            return 0.5 * (r[0] + r[1]);
-        };
-        if (scene_basis[static_cast<std::size_t>(scene)] ==
-                RpcAffineBandBasis::Constant ||
-            count < 2) {
+        if (sp.basis == RpcAffineBandBasis::Constant || count < 2) {
             int pick = 0;
             for (int i = 0; i < count; ++i) {
-                const auto& r = band_ranges[off + static_cast<std::size_t>(i)];
+                const auto& r = sp.range[static_cast<std::size_t>(i)];
                 if (row >= r[0] && row < r[1]) {
                     pick = i;
                     break;
                 }
             }
-            const auto& r = band_ranges[off + static_cast<std::size_t>(pick)];
+            const auto& r = sp.range[static_cast<std::size_t>(pick)];
             if (!(row >= r[0] && row < r[1])) {
                 // Outside every band: nearest center.
                 double best = std::numeric_limits<double>::infinity();
                 for (int i = 0; i < count; ++i) {
-                    const double d = std::fabs(Center(i) - row);
+                    const double d =
+                        std::fabs(sp.center[static_cast<std::size_t>(i)] - row);
                     if (d < best) {
                         best = d;
                         pick = i;
@@ -266,7 +260,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         }
         // Linear (tent) basis: bracket the row by band centers.
         int j = 0;
-        while (j < count && Center(j) < row) {
+        while (j < count && sp.center[static_cast<std::size_t>(j)] < row) {
             ++j;
         }
         if (j == 0 || j == count) {
@@ -275,12 +269,14 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             return terms;
         }
         const int i = j - 1;
-        const double span = Center(j) - Center(i);
+        const double span = sp.center[static_cast<std::size_t>(j)] -
+                            sp.center[static_cast<std::size_t>(i)];
         if (!(span > 0.0)) {
             terms.emplace_back(j, 1.0);
             return terms;
         }
-        const double w_i = (Center(j) - row) / span;
+        const double w_i =
+            (sp.center[static_cast<std::size_t>(j)] - row) / span;
         terms.emplace_back(i, w_i);
         terms.emplace_back(j, 1.0 - w_i);
         return terms;
@@ -290,7 +286,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         MeasureLayout lay;
         if (scene != derived_scene) {
             lay.aff_terms.emplace_back(
-                aff_blocks[static_cast<std::size_t>(scene)].data(), kOnes6);
+                scene_params[static_cast<std::size_t>(scene)].aff.data(),
+                kOnes6);
         } else {
             for (int k = 0; k < 6; ++k) {
                 lay.aff_const[static_cast<std::size_t>(k)] =
@@ -299,19 +296,18 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             }
             for (int s = 0; s + 1 < num_scenes; ++s) {
                 lay.aff_terms.emplace_back(
-                    aff_blocks[static_cast<std::size_t>(s)].data(), kNegOnes6);
+                    scene_params[static_cast<std::size_t>(s)].aff.data(),
+                    kNegOnes6);
             }
         }
         // Shift terms with derived-band expansion (each scene's
         // highest-center band derives its shift from the others);
         // accumulate per block so tent brackets never repeat a pointer.
-        const std::size_t off = static_cast<std::size_t>(
-            band_offset[static_cast<std::size_t>(scene)]);
-        const int count = band_count[static_cast<std::size_t>(scene)];
+        SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
+        const int count = static_cast<int>(sp.shift.size());
         for (const auto& [band, weight] : BandTerms(scene, row)) {
             if (band + 1 < count) {
-                double* src =
-                    shift_blocks[off + static_cast<std::size_t>(band)].data();
+                double* src = sp.shift[static_cast<std::size_t>(band)].data();
                 const auto it = std::find_if(
                     lay.shift_terms.begin(),
                     lay.shift_terms.end(),
@@ -326,8 +322,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                 continue;
             }
             for (int f = 0; f + 1 < count; ++f) {
-                double* src =
-                    shift_blocks[off + static_cast<std::size_t>(f)].data();
+                double* src = sp.shift[static_cast<std::size_t>(f)].data();
                 const auto it = std::find_if(
                     lay.shift_terms.begin(),
                     lay.shift_terms.end(),
@@ -465,10 +460,9 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     // shift (each scene's derived band adds none; affine-only scenes add
     // none).
     int free_shift_params = 0;
-    for (int s = 0; s < num_scenes; ++s) {
-        const int count = band_count[static_cast<std::size_t>(s)];
-        if (count > 1) {
-            free_shift_params += 2 * (count - 1);
+    for (const SceneParams& sp : scene_params) {
+        if (sp.shift.size() > 1) {
+            free_shift_params += 2 * static_cast<int>(sp.shift.size() - 1);
         }
     }
     const int free_affine_params = (zero_mean ? num_scenes - 1 : num_scenes) *
@@ -504,7 +498,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         if (s == derived_scene) {
             continue;
         }
-        double* block = aff_blocks[static_cast<std::size_t>(s)].data();
+        double* block = scene_params[static_cast<std::size_t>(s)].aff.data();
         problem.AddParameterBlock(block, 6);
         if (auto manifold = MakeAffineManifold(options.dof)) {
             problem.SetManifold(block, manifold.release());
@@ -512,13 +506,9 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         aff_ptrs.push_back(block);
     }
     std::vector<double*> shift_ptrs;
-    for (int s = 0; s < num_scenes; ++s) {
-        const int count = band_count[static_cast<std::size_t>(s)];
-        const std::size_t off =
-            static_cast<std::size_t>(band_offset[static_cast<std::size_t>(s)]);
-        for (int f = 0; f + 1 < count; ++f) {
-            double* block =
-                shift_blocks[off + static_cast<std::size_t>(f)].data();
+    for (SceneParams& sp : scene_params) {
+        for (std::size_t f = 0; f + 1 < sp.shift.size(); ++f) {
+            double* block = sp.shift[f].data();
             problem.AddParameterBlock(block, 2);
             shift_ptrs.push_back(block);
         }
@@ -665,7 +655,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                 continue;
             }
             RpcAffine aff;
-            aff.p = aff_blocks[static_cast<std::size_t>(s)];
+            aff.p = scene_params[static_cast<std::size_t>(s)].aff;
             corrected[static_cast<std::size_t>(s)].set_affine(aff);
         }
         if (zero_mean) {
@@ -678,8 +668,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             for (int s = 0; s + 1 < num_scenes; ++s) {
                 for (int k = 0; k < 6; ++k) {
                     derived[static_cast<std::size_t>(k)] -=
-                        aff_blocks[static_cast<std::size_t>(s)]
-                                  [static_cast<std::size_t>(k)];
+                        scene_params[static_cast<std::size_t>(s)]
+                            .aff[static_cast<std::size_t>(k)];
                 }
             }
             RpcAffine aff;
@@ -687,21 +677,19 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             corrected[static_cast<std::size_t>(num_scenes - 1)].set_affine(aff);
         }
         for (int s = 0; s < num_scenes; ++s) {
-            const int count = band_count[static_cast<std::size_t>(s)];
-            if (count > 0) {
-                const std::size_t off = static_cast<std::size_t>(
-                    band_offset[static_cast<std::size_t>(s)]);
-                std::array<double, 2> derived{0.0, 0.0};
-                for (int f = 0; f + 1 < count; ++f) {
-                    const std::size_t g = off + static_cast<std::size_t>(f);
-                    corrected[static_cast<std::size_t>(s)].set_band_shift(
-                        f, shift_blocks[g][0], shift_blocks[g][1]);
-                    derived[0] -= shift_blocks[g][0];
-                    derived[1] -= shift_blocks[g][1];
-                }
-                corrected[static_cast<std::size_t>(s)].set_band_shift(
-                    count - 1, derived[0], derived[1]);
+            const SceneParams& sp = scene_params[static_cast<std::size_t>(s)];
+            if (sp.shift.empty()) {
+                continue;
             }
+            std::array<double, 2> derived{0.0, 0.0};
+            for (std::size_t f = 0; f + 1 < sp.shift.size(); ++f) {
+                corrected[static_cast<std::size_t>(s)].set_band_shift(
+                    static_cast<int>(f), sp.shift[f][0], sp.shift[f][1]);
+                derived[0] -= sp.shift[f][0];
+                derived[1] -= sp.shift[f][1];
+            }
+            corrected[static_cast<std::size_t>(s)].set_band_shift(
+                static_cast<int>(sp.shift.size() - 1), derived[0], derived[1]);
         }
     }
 
