@@ -1,25 +1,26 @@
-// Ceres-based banded bundle adjustment: one global affine per scene plus
-// per-band translation shifts (see rpc_bundle_adjust.hpp for the model,
-// the gauge handling and the observability caveats).
+// Ceres-based gridded bundle adjustment: one global affine per scene plus
+// per-cell translation shifts over a 2D (col, row) grid, and the two-stage
+// driver that stages the decomposition (see rpc_bundle_adjust.hpp for the
+// models, the gauge handling and the observability caveats).
 //
-// The corrections travel as RpcAffineBanded objects (one per scene, in and
-// out); internally the solve unpacks them into per-scene SceneParams (the
-// affine block, the band structure the object came with, and the free +
-// derived shift blocks in local-band order) and writes the solved values
-// back through the objects' mutators on success.
+// The corrections travel as RpcAffineGridded objects (one per scene, in
+// and out); internally the solve unpacks them into per-scene SceneParams
+// (the affine block, the grid structure the object came with, and the
+// free + derived shift blocks in canonical cell order) and writes the
+// solved values back through the objects' mutators on success.
 //
 // The parameter structure is expressed with ONE generic dynamic-autodiff
 // cost: every quantity the residual evaluates is an affine (linear)
 // combination of parameter blocks --
 //
 //     effective affine = aff_const + sum(coef * scene affine block)
-//     effective shift  = sum(coef * band shift block)
+//     effective shift  = sum(coef * cell shift block)
 //
 // which covers all the cases uniformly: a free scene's affine is a single
 // coefficient-1 term; the zero-mean-derived last scene expands to
-// S*identity - sum(others); a free band's shift is a coefficient-1 (or
-// tent-weighted) term; the zero-mean-derived highest-center band of a
-// scene expands to -sum(others). The blocks land in the camera group of
+// S*identity - sum(others); a free cell's shift is a coefficient-1 (or
+// bilinear-weighted) term; the zero-mean-derived canonically-last cell of
+// a scene expands to -sum(others). The blocks land in the camera group of
 // the Schur ordering whatever they combine, so DENSE_SCHUR keeps
 // eliminating only the 3-parameter ground blocks.
 #include <algorithm>
@@ -42,6 +43,7 @@ namespace zproj::crs {
 namespace {
 
 using refine_detail::AffinePrior;
+using refine_detail::IdentityPriorPx;
 using refine_detail::kAffineIdentity;
 using refine_detail::MakeAffineManifold;
 using refine_detail::NewLoss;
@@ -86,18 +88,18 @@ RpcAffine EvalEffective(const MeasureLayout& lay) {
 }
 
 // Reprojection cost: projects one ground block through one scene's RPC and
-// the measure's effective (affine + band shift) correction. Parameter
+// the measure's effective (affine + cell shift) correction. Parameter
 // blocks arrive as [aff_terms..., shift_terms..., ground]; residuals in
 // units of pixel_sigma. Forward RPC evaluation only, so autodiff is exact.
 // Dynamic autodiff because the block list varies (free vs derived scene,
-// one-hot vs tent bands); the jet count stays ~(6 + 4 + 3), the same order
-// as the plain solver's static (6, 3) costs.
-struct BandedReprojError {
-    BandedReprojError(const RpcInfo* info,
-                      double obs_col,
-                      double obs_row,
-                      double pixel_sigma,
-                      MeasureLayout layout)
+// one-hot vs bilinear cells); the jet count stays ~(6 + 8 + 3), the same
+// order as the plain solver's static (6, 3) costs.
+struct GriddedReprojError {
+    GriddedReprojError(const RpcInfo* info,
+                       double obs_col,
+                       double obs_row,
+                       double pixel_sigma,
+                       MeasureLayout layout)
         : info_(info),
           obs_col_(obs_col),
           obs_row_(obs_row),
@@ -150,7 +152,7 @@ struct BandedReprojError {
     MeasureLayout layout_;
 };
 
-// Tikhonov prior on one band shift block: residuals = w * shift (pulling
+// Tikhonov prior on one cell shift block: residuals = w * shift (pulling
 // towards "the scene affine alone").
 struct ShiftPrior {
     explicit ShiftPrior(double weight) : weight_(weight) {}
@@ -165,28 +167,30 @@ struct ShiftPrior {
     double weight_;
 };
 
-// Per-scene solve storage: everything one scene contributes, in LOCAL band
-// order (the caller's object stores bands sorted by ascending center, so
-// local band count-1 is the highest-center -- derived -- band). The
+// Per-scene solve storage: everything one scene contributes, in CANONICAL
+// cell order (the caller's object stores the regular row-major grid, so
+// local cell count-1 is the canonically last -- derived -- cell). The
 // containers are sized once and only their elements mutate afterwards, so
 // the parameter blocks taken from them stay address-stable through the
 // solve.
 struct SceneParams {
     std::array<double, 6> aff;  // the scene affine block
-    RpcAffineBandBasis basis = RpcAffineBandBasis::Linear;
-    std::vector<std::array<double, 2>> shift;  // [i]: local band i's block
-    std::vector<std::array<double, 2>> range;  // [i]: (col_lo, col_hi)
-    std::vector<double> center;                // [i]: band col center,
-                                               //      ascending
+    RpcAffineGridBasis basis = RpcAffineGridBasis::Linear;
+    std::vector<std::array<double, 2>> shift;      // [i]: local cell i's block
+    std::vector<std::array<double, 2>> col_range;  // [i]: (col_lo, col_hi)
+    std::vector<std::array<double, 2>> row_range;  // [i]: (row_lo, row_hi)
+    std::vector<double> col_center;                // [i]: cell col center
+    std::vector<double> row_center;                // [i]: cell row center
+    int num_cols = 1;  // cells per grid row (the tensor layout)
 };
 
 }  // namespace
 
-RpcBaReport solve_rpc_bundle_adjust_banded(
+RpcBaReport solve_rpc_bundle_adjust_gridded(
     const std::vector<RpcInfo>& scenes,
     const std::vector<RpcBaPoint>& points,
-    std::vector<RpcAffineBanded>& corrected,
-    const RpcBaBandedOptions& options) {
+    std::vector<RpcAffineGridded>& corrected,
+    const RpcBaGridOptions& options) {
     RpcBaReport report;
     const int num_scenes = static_cast<int>(scenes.size());
     if (num_scenes == 0) {
@@ -203,53 +207,67 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     // ---- Unpack the scene corrections into solve storage -----------------
     std::vector<SceneParams> scene_params(static_cast<std::size_t>(num_scenes));
     for (int s = 0; s < num_scenes; ++s) {
-        const RpcAffineBanded& obj = corrected[static_cast<std::size_t>(s)];
+        const RpcAffineGridded& obj = corrected[static_cast<std::size_t>(s)];
         SceneParams& sp = scene_params[static_cast<std::size_t>(s)];
         sp.aff = obj.affine().p;
         sp.basis = obj.basis();
-        sp.shift.resize(static_cast<std::size_t>(obj.num_bands()));
-        sp.range.resize(static_cast<std::size_t>(obj.num_bands()));
-        sp.center.resize(static_cast<std::size_t>(obj.num_bands()));
-        for (int i = 0; i < obj.num_bands(); ++i) {
-            sp.shift[static_cast<std::size_t>(i)] = {obj.band(i).dx,
-                                                     obj.band(i).dy};
-            sp.range[static_cast<std::size_t>(i)] = {obj.band(i).col_lo,
-                                                     obj.band(i).col_hi};
-            sp.center[static_cast<std::size_t>(i)] =
-                0.5 * (obj.band(i).col_lo + obj.band(i).col_hi);
+        sp.num_cols = obj.num_cols();
+        sp.shift.resize(static_cast<std::size_t>(obj.num_cells()));
+        sp.col_range.resize(static_cast<std::size_t>(obj.num_cells()));
+        sp.row_range.resize(static_cast<std::size_t>(obj.num_cells()));
+        sp.col_center.resize(static_cast<std::size_t>(obj.num_cells()));
+        sp.row_center.resize(static_cast<std::size_t>(obj.num_cells()));
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            const auto& c = obj.cell(i);
+            sp.shift[static_cast<std::size_t>(i)] = {c.dx, c.dy};
+            sp.col_range[static_cast<std::size_t>(i)] = {c.col_lo, c.col_hi};
+            sp.row_range[static_cast<std::size_t>(i)] = {c.row_lo, c.row_hi};
+            sp.col_center[static_cast<std::size_t>(i)] =
+                0.5 * (c.col_lo + c.col_hi);
+            sp.row_center[static_cast<std::size_t>(i)] =
+                0.5 * (c.row_lo + c.row_hi);
         }
     }
-    const bool zero_mean = options.zero_mean_affines;
+    // fix_scene_affines (stage 2) holds every affine constant; the
+    // zero-mean derivation is then moot and ignored.
+    const bool zero_mean =
+        options.zero_mean_affines && !options.fix_scene_affines;
     const int derived_scene = zero_mean ? num_scenes - 1 : -1;
 
-    // ---- Measure -> band terms, and the per-measure layout ----------------
-    // (local band index, weight) pairs for one measure col; Constant basis
-    // picks the containing (else nearest) band, Linear blends the two
-    // bracketing band centers with constant extension outside them. A
-    // scene without bands contributes no terms (plain affine scene).
-    const auto BandTerms = [&](int scene, double col) {
+    // ---- Measure -> cell terms, and the per-measure layout ----------------
+    // (local cell index, weight) pairs for one measure pixel; Constant
+    // basis picks the containing (else nearest-center) cell, Linear blends
+    // the up to four bilinearly bracketing cells of the regular grid
+    // (constant extension outside the center spans, per axis). A scene
+    // without cells contributes no terms (plain affine scene).
+    const auto CellTerms = [&](int scene, double col, double row) {
         std::vector<std::pair<int, double>> terms;
         const SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
         const int count = static_cast<int>(sp.shift.size());
         if (count == 0) {
             return terms;
         }
-        if (sp.basis == RpcAffineBandBasis::Constant || count < 2) {
-            int pick = 0;
+        if (sp.basis == RpcAffineGridBasis::Constant || count < 2) {
+            int pick = -1;
             for (int i = 0; i < count; ++i) {
-                const auto& r = sp.range[static_cast<std::size_t>(i)];
-                if (col >= r[0] && col < r[1]) {
+                const auto& cr = sp.col_range[static_cast<std::size_t>(i)];
+                const auto& rr = sp.row_range[static_cast<std::size_t>(i)];
+                if (col >= cr[0] && col < cr[1] && row >= rr[0] &&
+                    row < rr[1]) {
                     pick = i;
                     break;
                 }
             }
-            const auto& r = sp.range[static_cast<std::size_t>(pick)];
-            if (!(col >= r[0] && col < r[1])) {
-                // Outside every band: nearest center.
+            if (pick < 0) {
+                // Outside every cell: nearest center (pixel-space 2D
+                // distance).
                 double best = std::numeric_limits<double>::infinity();
                 for (int i = 0; i < count; ++i) {
-                    const double d =
-                        std::fabs(sp.center[static_cast<std::size_t>(i)] - col);
+                    const double dc =
+                        sp.col_center[static_cast<std::size_t>(i)] - col;
+                    const double dr =
+                        sp.row_center[static_cast<std::size_t>(i)] - row;
+                    const double d = (dc * dc) + (dr * dr);
                     if (d < best) {
                         best = d;
                         pick = i;
@@ -259,31 +277,90 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             terms.emplace_back(pick, 1.0);
             return terms;
         }
-        // Linear (tent) basis: bracket the col by band centers.
-        int j = 0;
-        while (j < count && sp.center[static_cast<std::size_t>(j)] < col) {
-            ++j;
+        // Linear (tensor tent) basis: bracket each axis of the regular
+        // grid by its centers (col centers are cells [0, num_cols); row
+        // centers are cells [k * num_cols, ...)), then combine the
+        // weights. A clamped axis collapses to its boundary cell.
+        const int cols = sp.num_cols;
+        const int rows = count / cols;
+        int ic = 0;
+        int jc = 0;
+        double wci = 1.0;
+        double wcj = 0.0;
+        if (cols > 1) {
+            while (jc < cols &&
+                   sp.col_center[static_cast<std::size_t>(jc)] < col) {
+                ++jc;
+            }
+            if (jc == 0 || jc == cols) {
+                ic = jc = (jc == 0) ? 0 : cols - 1;
+                wci = 1.0;
+                wcj = 0.0;
+            } else {
+                ic = jc - 1;
+                const double span =
+                    sp.col_center[static_cast<std::size_t>(jc)] -
+                    sp.col_center[static_cast<std::size_t>(ic)];
+                if (!(span > 0.0)) {
+                    ic = jc;
+                    wci = 1.0;
+                    wcj = 0.0;
+                } else {
+                    wci = (sp.col_center[static_cast<std::size_t>(jc)] - col) /
+                          span;
+                    wcj = 1.0 - wci;
+                }
+            }
         }
-        if (j == 0 || j == count) {
-            // Constant extension outside the center span.
-            terms.emplace_back(j == 0 ? 0 : count - 1, 1.0);
-            return terms;
+        int ir = 0;
+        int jr = 0;
+        double wri = 1.0;
+        double wrj = 0.0;
+        if (rows > 1) {
+            while (jr < rows &&
+                   sp.row_center[static_cast<std::size_t>(jr * cols)] < row) {
+                ++jr;
+            }
+            if (jr == 0 || jr == rows) {
+                ir = jr = (jr == 0) ? 0 : rows - 1;
+                wri = 1.0;
+                wrj = 0.0;
+            } else {
+                ir = jr - 1;
+                const double span =
+                    sp.row_center[static_cast<std::size_t>(jr * cols)] -
+                    sp.row_center[static_cast<std::size_t>(ir * cols)];
+                if (!(span > 0.0)) {
+                    ir = jr;
+                    wri = 1.0;
+                    wrj = 0.0;
+                } else {
+                    wri = (sp.row_center[static_cast<std::size_t>(jr * cols)] -
+                           row) /
+                          span;
+                    wrj = 1.0 - wri;
+                }
+            }
         }
-        const int i = j - 1;
-        const double span = sp.center[static_cast<std::size_t>(j)] -
-                            sp.center[static_cast<std::size_t>(i)];
-        if (!(span > 0.0)) {
-            terms.emplace_back(j, 1.0);
-            return terms;
+        for (int a = 0; a < 2; ++a) {
+            const int r = (a == 0) ? ir : jr;
+            const double wr = (a == 0) ? wri : wrj;
+            if (wr == 0.0) {
+                continue;
+            }
+            for (int b = 0; b < 2; ++b) {
+                const int c = (b == 0) ? ic : jc;
+                const double wc = (b == 0) ? wci : wcj;
+                if (wc == 0.0) {
+                    continue;
+                }
+                terms.emplace_back(r * cols + c, wr * wc);
+            }
         }
-        const double w_i =
-            (sp.center[static_cast<std::size_t>(j)] - col) / span;
-        terms.emplace_back(i, w_i);
-        terms.emplace_back(j, 1.0 - w_i);
         return terms;
     };
 
-    const auto MakeLayout = [&](int scene, double col) {
+    const auto MakeLayout = [&](int scene, double col, double row) {
         MeasureLayout lay;
         if (scene != derived_scene) {
             lay.aff_terms.emplace_back(
@@ -301,14 +378,15 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                     kNegOnes6);
             }
         }
-        // Shift terms with derived-band expansion (each scene's
-        // highest-center band derives its shift from the others);
-        // accumulate per block so tent brackets never repeat a pointer.
+        // Shift terms with derived-cell expansion (each scene's
+        // canonically-last cell derives its shift from the others);
+        // accumulate per block so bilinear brackets never repeat a
+        // pointer.
         SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
         const int count = static_cast<int>(sp.shift.size());
-        for (const auto& [band, weight] : BandTerms(scene, col)) {
-            if (band + 1 < count) {
-                double* src = sp.shift[static_cast<std::size_t>(band)].data();
+        for (const auto& [cell, weight] : CellTerms(scene, col, row)) {
+            if (cell + 1 < count) {
+                double* src = sp.shift[static_cast<std::size_t>(cell)].data();
                 const auto it = std::find_if(
                     lay.shift_terms.begin(),
                     lay.shift_terms.end(),
@@ -341,7 +419,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     };
 
     // ---- Sanitize the control network -------------------------------------
-    // Measures reference scenes; a non-finite col cannot be banded.
+    // Measures reference scenes; a non-finite pixel cannot be gridded.
     std::vector<RpcBaPoint> ties;
     std::vector<RpcBaPoint> gcps;
     int skipped = 0;
@@ -356,7 +434,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         clean.measures.clear();
         bool bad = false;
         for (const RpcBaMeasure& m : pt.measures) {
-            if (m.view < 0 || m.view >= num_scenes || !std::isfinite(m.col)) {
+            if (m.view < 0 || m.view >= num_scenes || !std::isfinite(m.col) ||
+                !std::isfinite(m.row)) {
                 bad = true;
                 break;
             }
@@ -398,7 +477,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         for (const RpcBaMeasure& m : pt.measures) {
             const RpcInfo& v = scenes[static_cast<std::size_t>(m.view)];
             const double span = std::min(0.9 * v.height_scale, 50.0);
-            const RpcAffine eff = EvalEffective(MakeLayout(m.view, m.col));
+            const RpcAffine eff =
+                EvalEffective(MakeLayout(m.view, m.col, m.row));
             RpcRay ray;
             if (rpc_ray_affine(
                     v,
@@ -457,8 +537,9 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     }
 
     // ---- Constraint accounting --------------------------------------------
-    // Free parameters: the free scene affines' dof plus 2 per free band
-    // shift (each scene's derived band adds none; affine-only scenes add
+    // Free parameters: the free scene affines' dof (none under
+    // fix_scene_affines -- the affines are constants) plus 2 per free cell
+    // shift (each scene's derived cell adds none; affine-only scenes add
     // none).
     int free_shift_params = 0;
     for (const SceneParams& sp : scene_params) {
@@ -466,11 +547,14 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             free_shift_params += 2 * static_cast<int>(sp.shift.size() - 1);
         }
     }
-    const int free_affine_params = (zero_mean ? num_scenes - 1 : num_scenes) *
-                                   static_cast<int>(options.dof);
+    const int free_affine_params =
+        options.fix_scene_affines ? 0
+                                  : (zero_mean ? num_scenes - 1 : num_scenes) *
+                                        static_cast<int>(options.dof);
     const int n_free_params = free_affine_params + free_shift_params;
     const bool has_prior = options.affine_prior_weight > 0.0 ||
-                           options.band_shift_prior_weight > 0.0;
+                           options.identity_prior_px > 0.0 ||
+                           options.cell_shift_prior_weight > 0.0;
     double net = 0.0;
     for (const RpcBaPoint& t : ties) {
         net += 2.0 * static_cast<double>(t.measures.size()) -
@@ -486,7 +570,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                          " constraints and cannot float " +
                          std::to_string(n_free_params) + " free parameters (" +
                          std::to_string(free_affine_params) + " affine + " +
-                         std::to_string(free_shift_params) + " band shift)";
+                         std::to_string(free_shift_params) + " cell shift)";
         report.num_points_skipped = skipped;
         return report;
     }
@@ -497,10 +581,16 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     std::vector<double*> aff_ptrs;
     for (int s = 0; s < num_scenes; ++s) {
         if (s == derived_scene) {
+            // Derived under zero-mean: residuals reference the other
+            // scenes' blocks, so this one is never a parameter block.
             continue;
         }
         double* block = scene_params[static_cast<std::size_t>(s)].aff.data();
         problem.AddParameterBlock(block, 6);
+        if (options.fix_scene_affines) {
+            problem.SetParameterBlockConstant(block);
+            continue;
+        }
         if (auto manifold = MakeAffineManifold(options.dof)) {
             problem.SetManifold(block, manifold.release());
         }
@@ -519,7 +609,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
 
     const auto AddMeasures = [&](const RpcBaPoint& pt, double* ground_block) {
         for (const RpcBaMeasure& m : pt.measures) {
-            MeasureLayout lay = MakeLayout(m.view, m.col);
+            MeasureLayout lay = MakeLayout(m.view, m.col, m.row);
             std::vector<double*> blocks;
             blocks.reserve(lay.aff_terms.size() + lay.shift_terms.size() + 1);
             for (const auto& term : lay.aff_terms) {
@@ -533,8 +623,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             const std::size_t num_aff = lay.aff_terms.size();
             const std::size_t num_shift = lay.shift_terms.size();
             auto* fn =
-                new ceres::DynamicAutoDiffCostFunction<BandedReprojError>(
-                    new BandedReprojError(
+                new ceres::DynamicAutoDiffCostFunction<GriddedReprojError>(
+                    new GriddedReprojError(
                         &scenes[static_cast<std::size_t>(m.view)],
                         m.col,
                         m.row,
@@ -580,20 +670,36 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         ordering->AddElementToGroup(b, 1);
     }
 
-    if (options.affine_prior_weight > 0.0) {
-        for (double* b : aff_ptrs) {
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
-                    new AffinePrior(options.affine_prior_weight)),
-                nullptr,
-                b);
+    if (!options.fix_scene_affines) {
+        for (int s = 0; s < num_scenes; ++s) {
+            if (s == derived_scene) {
+                continue;
+            }
+            double* b = scene_params[static_cast<std::size_t>(s)].aff.data();
+            if (options.identity_prior_px > 0.0) {
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<IdentityPriorPx, 6, 6>(
+                        new IdentityPriorPx(
+                            options.identity_prior_px,
+                            scenes[static_cast<std::size_t>(s)].samp_scale,
+                            scenes[static_cast<std::size_t>(s)].line_scale)),
+                    nullptr,
+                    b);
+            }
+            if (options.affine_prior_weight > 0.0) {
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
+                        new AffinePrior(options.affine_prior_weight)),
+                    nullptr,
+                    b);
+            }
         }
     }
-    if (options.band_shift_prior_weight > 0.0) {
+    if (options.cell_shift_prior_weight > 0.0) {
         for (double* b : shift_ptrs) {
             problem.AddResidualBlock(
                 new ceres::AutoDiffCostFunction<ShiftPrior, 2, 2>(
-                    new ShiftPrior(options.band_shift_prior_weight)),
+                    new ShiftPrior(options.cell_shift_prior_weight)),
                 nullptr,
                 b);
         }
@@ -608,7 +714,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                                    const std::array<double, 3>& g) {
                 for (const RpcBaMeasure& m : pt.measures) {
                     const RpcAffine eff =
-                        EvalEffective(MakeLayout(m.view, m.col));
+                        EvalEffective(MakeLayout(m.view, m.col, m.row));
                     sum += ResidualSq(scenes[static_cast<std::size_t>(m.view)],
                                       eff.p.data(),
                                       g.data(),
@@ -649,7 +755,8 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
 
     // Write the solved values back into the caller's objects, including
     // the derived quantities. Only on success -- a failed solve must
-    // leave them untouched.
+    // leave them untouched. (Under fix_scene_affines the affine blocks
+    // are constants, so this writes their incoming values back.)
     if (solved.ok) {
         for (int s = 0; s < num_scenes; ++s) {
             if (s == derived_scene) {
@@ -684,12 +791,12 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             }
             std::array<double, 2> derived{0.0, 0.0};
             for (std::size_t f = 0; f + 1 < sp.shift.size(); ++f) {
-                corrected[static_cast<std::size_t>(s)].set_band_shift(
+                corrected[static_cast<std::size_t>(s)].set_cell_shift(
                     static_cast<int>(f), sp.shift[f][0], sp.shift[f][1]);
                 derived[0] -= sp.shift[f][0];
                 derived[1] -= sp.shift[f][1];
             }
-            corrected[static_cast<std::size_t>(s)].set_band_shift(
+            corrected[static_cast<std::size_t>(s)].set_cell_shift(
                 static_cast<int>(sp.shift.size() - 1), derived[0], derived[1]);
         }
     }
@@ -709,6 +816,54 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     out.rms_before_px = rms_before;
     out.rms_after_px = ReprojectionRms(ground);
     out.message = std::move(solved.message);
+    return out;
+}
+
+RpcBaTwoStageReport solve_rpc_bundle_adjust_two_stage(
+    const std::vector<RpcInfo>& scenes,
+    const std::vector<RpcBaPoint>& points,
+    std::vector<RpcAffineGridded>& corrected,
+    const RpcBaGridOptions& options) {
+    RpcBaTwoStageReport out;
+    if (scenes.empty()) {
+        out.affine_stage.message = "no scenes";
+        return out;
+    }
+    if (corrected.size() != scenes.size()) {
+        out.affine_stage.message =
+            "corrected must have one entry per scene (got " +
+            std::to_string(corrected.size()) + ", expected " +
+            std::to_string(scenes.size()) + ")";
+        return out;
+    }
+
+    // Stage 1: the plain per-scene affine solve over the same network,
+    // held near identity by identity_prior_px (the caller sets it to the
+    // trusted absolute accuracy of the RPC products -- the staging's
+    // whole point, see rpc_bundle_adjust.hpp).
+    std::vector<RpcAffine> affines;
+    affines.reserve(scenes.size());
+    for (const RpcAffineGridded& g : corrected) {
+        affines.push_back(g.affine());
+    }
+    out.affine_stage =
+        solve_rpc_bundle_adjust(scenes, points, affines, options);
+    if (!out.affine_stage.ok) {
+        // corrected untouched: a failed stage 1 leaves the whole staging
+        // moot.
+        return out;
+    }
+    for (std::size_t s = 0; s < scenes.size(); ++s) {
+        corrected[s].set_affine(affines[s]);
+    }
+
+    // Stage 2: affines frozen at stage 1's solution; only the cells'
+    // translation shifts float.
+    RpcBaGridOptions grid_options = options;
+    grid_options.fix_scene_affines = true;
+    grid_options.zero_mean_affines = false;
+    out.grid_stage = solve_rpc_bundle_adjust_gridded(
+        scenes, points, corrected, grid_options);
     return out;
 }
 

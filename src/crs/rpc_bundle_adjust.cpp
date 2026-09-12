@@ -29,6 +29,7 @@ namespace zproj::crs {
 namespace {
 
 using refine_detail::AffinePrior;
+using refine_detail::IdentityPriorPx;
 using refine_detail::kAffineIdentity;
 using refine_detail::MakeAffineManifold;
 using refine_detail::MakeReprojCost;
@@ -303,7 +304,8 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
     const bool zero_mean = options.zero_mean_affines;
     const int num_free = zero_mean ? num_views - 1 : num_views;
     const int n_affine_params = num_free * static_cast<int>(options.dof);
-    const bool has_prior = options.affine_prior_weight > 0.0;
+    const bool has_prior =
+        options.affine_prior_weight > 0.0 || options.identity_prior_px > 0.0;
     double net = 0.0;
     for (const RpcBaPoint& t : ties) {
         net += 2.0 * static_cast<double>(t.measures.size()) -
@@ -408,12 +410,25 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
     if (has_prior) {
         // Under zero_mean this regularizes the differential parameters only
         // (the derived view adds none).
-        for (double* b : free_blocks) {
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
-                    new AffinePrior(options.affine_prior_weight)),
-                nullptr,
-                b);
+        for (int v = 0; v < num_free; ++v) {
+            double* b = free_blocks[static_cast<std::size_t>(v)];
+            if (options.identity_prior_px > 0.0) {
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<IdentityPriorPx, 6, 6>(
+                        new IdentityPriorPx(
+                            options.identity_prior_px,
+                            views[static_cast<std::size_t>(v)].samp_scale,
+                            views[static_cast<std::size_t>(v)].line_scale)),
+                    nullptr,
+                    b);
+            }
+            if (options.affine_prior_weight > 0.0) {
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<AffinePrior, 6, 6>(
+                        new AffinePrior(options.affine_prior_weight)),
+                    nullptr,
+                    b);
+            }
         }
     }
 

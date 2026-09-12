@@ -53,11 +53,12 @@ if(TARGET zproj::refine)
     add_executable(rpc_bundle_adjust rpc_bundle_adjust/main.cpp)
     target_link_libraries(rpc_bundle_adjust PRIVATE zproj zproj::refine)
 
-    # Banded bundle adjustment demo (Ceres): the wave-absorbing camera model
-    # (one global affine per scene + tent-basis band shifts) recovering a
-    # known affine + single-period row-wave corruption; reports the
-    # residual-vs-row profile (the W shape) flattening and the ground
-    # accuracy of corrected vs raw triangulation.
-    add_executable(rpc_bundle_adjust_banded rpc_bundle_adjust_banded/main.cpp)
-    target_link_libraries(rpc_bundle_adjust_banded PRIVATE zproj zproj::refine)
+    # Two-stage gridded bundle adjustment demo (Ceres): stage 1 solves
+    # the global affines under the pixel-unit identity prior, stage 2
+    # freezes them and floats a 2D tent grid of translation shifts;
+    # reports the per-stage rms, the (row x col) residual table
+    # flattening along both axes, and the ground accuracy of corrected vs
+    # raw triangulation.
+    add_executable(rpc_bundle_adjust_gridded rpc_bundle_adjust_gridded/main.cpp)
+    target_link_libraries(rpc_bundle_adjust_gridded PRIVATE zproj zproj::refine)
 endif()

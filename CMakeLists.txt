@@ -246,7 +246,7 @@ if(ZPROJ_BUILD_RPC_REFINE)
     add_library(zproj_refine STATIC
         src/crs/rpc_affine.cpp
         src/crs/rpc_bundle_adjust.cpp
-        src/crs/rpc_bundle_adjust_banded.cpp
+        src/crs/rpc_bundle_adjust_gridded.cpp
     )
     add_library(zproj::refine ALIAS zproj_refine)
     target_link_libraries(zproj_refine

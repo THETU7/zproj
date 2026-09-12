@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -106,6 +107,68 @@ struct AffinePrior {
 
     double weight_;
 };
+
+// Identity prior with residuals in PIXEL units -- the one that can
+// actually pin a satellite affine. The plain AffinePrior weights the
+// raw parameters, but they live at wildly different scales (translations
+// ~0, linear terms ~1 with physically meaningful deviations ~1e-4), so a
+// unit weight barely touches a tilt that moves image edges by whole
+// pixels. Here each deviation is mapped to the pixel shift it causes at
+// the RPC validity domain's edge first:
+//
+//     translations e0/f0:  the shift itself [px]
+//     col-linear e1/f1:    deviation * col_half  (px at the domain edge)
+//     row-linear e2/f2:    deviation * row_half
+//
+// (`col_half`/`row_half` are samp_scale/line_scale: the domain edge sits
+// one scale from the offset.) Residual = deviation_px / sigma_px, so e.g.
+// sigma = 2 px means "a 2-sigma solution tilts the scene edge by 4 px" --
+// the right knob for RPC products whose absolute georeferencing is near
+// correct and only needs a few-pixel correction.
+struct IdentityPriorPx {
+    IdentityPriorPx(double sigma_px, double col_half, double row_half)
+        : inv_sigma_(1.0 / ((sigma_px > 0.0) ? sigma_px : 1.0)),
+          col_half_(col_half),
+          row_half_(row_half) {}
+
+    template<typename T>
+    bool operator()(const T* const affine, T* residuals) const {
+        residuals[0] = T(inv_sigma_) * (affine[0] - T(kAffineIdentity[0]));
+        residuals[1] =
+            T(inv_sigma_) * T(col_half_) * (affine[1] - T(kAffineIdentity[1]));
+        residuals[2] =
+            T(inv_sigma_) * T(row_half_) * (affine[2] - T(kAffineIdentity[2]));
+        residuals[3] = T(inv_sigma_) * (affine[3] - T(kAffineIdentity[3]));
+        residuals[4] =
+            T(inv_sigma_) * T(col_half_) * (affine[4] - T(kAffineIdentity[4]));
+        residuals[5] =
+            T(inv_sigma_) * T(row_half_) * (affine[5] - T(kAffineIdentity[5]));
+        return true;
+    }
+
+    double inv_sigma_;
+    double col_half_;
+    double row_half_;
+};
+
+// An affine's largest deviation from `other`, in PIXEL units at the
+// domain edge (same mapping as IdentityPriorPx) -- the fair way to
+// compare two affines' practical difference (translations and tilts on
+// one scale).
+inline double AffineDeltaPx(const RpcAffine& a,
+                            const RpcAffine& b,
+                            double col_half,
+                            double row_half) {
+    const double scale[6] = {1.0, col_half, row_half, 1.0, col_half, row_half};
+    double worst = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        const double d = std::fabs(a.p[static_cast<std::size_t>(i)] -
+                                   b.p[static_cast<std::size_t>(i)]) *
+                         scale[static_cast<std::size_t>(i)];
+        worst = std::max(worst, d);
+    }
+    return worst;
+}
 
 // Parameter-block layout [e0, e1, e2, f0, f1, f2]; held-constant indices per
 // RpcAffineDoF. Null for Full (no manifold).

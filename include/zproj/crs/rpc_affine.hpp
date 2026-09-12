@@ -111,176 +111,257 @@ struct RpcAffine {
     }
 };
 
-// How a banded affine blends its band shifts across columns (the
-// correction basis shared by the banded solver and RpcAffineBanded below).
-enum class RpcAffineBandBasis {
-    // One-hot: the band whose [col_lo, col_hi) contains the col takes the
-    // full shift (nearest band outside the covered range). Piecewise-
-    // constant correction; jumps at band boundaries. The shape of
-    // detector-array stitching errors (CCD segment offsets).
+// How a gridded affine blends its cell shifts across the (col, row) grid
+// (the correction basis shared by the gridded solver and RpcAffineGridded
+// below).
+enum class RpcAffineGridBasis {
+    // One-hot: the cell whose [col_lo, col_hi) x [row_lo, row_hi) contains
+    // the pixel takes the full shift (nearest center outside the covered
+    // range). Piecewise-constant correction; jumps at cell boundaries.
+    // The shape of detector-array stitching errors (CCD segment offsets).
     Constant,
-    // Tent: linear interpolation between the two nearest band centers
-    // (constant extension outside them). Piecewise-LINEAR, C0-continuous
-    // -- no seams. The usual choice for smooth col-dependent error.
+    // Tensor-product tent: bilinear interpolation between the four
+    // bracketing cell centers (constant extension outside the center
+    // spans, per axis). Piecewise-bilinear, C0-continuous -- no seams.
+    // The usual choice for smooth 2D-dependent error.
     Linear,
 };
 
-// The consumer-side composite correction of solve_rpc_bundle_adjust_banded
-// (rpc_bundle_adjust.hpp): one RpcAffine plus per-band translation shifts,
-// banded along the pixel COLUMN axis (the cross-track detector-array error
-// model -- see the banded-variant notes there), ready to apply to pixels
-// -- downstream code consumes THIS instead of juggling the scene affine,
-// the band table and the shift table and re-implementing the blending.
+// The consumer-side composite correction of solve_rpc_bundle_adjust_
+// gridded (rpc_bundle_adjust.hpp): one RpcAffine plus per-cell
+// translation shifts over a 2D column x row grid, ready to apply to
+// pixels -- downstream code consumes THIS instead of juggling the scene
+// affine, the cell table and the shift table and re-implementing the
+// blending.
 //
-//     col' = (e0 + dx_band(col)) + e1*col + e2*row
-//     row' = (f0 + dy_band(col)) + f1*col + f2*row
+//     col' = (e0 + dx_cell(col, row)) + e1*col + e2*row
+//     row' = (f0 + dy_cell(col, row)) + f1*col + f2*row
 //
-// Fixed-size storage (kMaxBands, the same cap convention as the CUDA
+// A one-row grid (MakeUniform) degenerates to pure column banding: the
+// row axis carries no structure.
+//
+// Fixed-size storage (kMaxCells, the same cap convention as the CUDA
 // N-view kernels) keeps the struct a plain-data value that device kernels
-// can take by value, like RpcAffine. Bands are stored sorted by column
-// center at Make() time (host); the blending methods are host/device
-// shared arithmetic. Compose with the existing machinery through
-// EffectiveAffine:
+// can take by value, like RpcAffine. Cells are stored in canonical
+// row-major order (sorted by row center, then col center) at Make() time
+// (host); the blending methods are host/device shared arithmetic. The
+// Linear basis additionally requires a REGULAR tensor grid (every row
+// carrying the same column centers) -- Make validates and rejects
+// anything else, and MakeUniform2D always produces one. Compose with the
+// existing machinery through EffectiveAffine:
 //
-//     corrected pixel:            baff.Apply(col, row, c2, r2);
+//     corrected pixel:            grid.Apply(col, row, c2, r2);
 //     forward through correction: rpc_forward_point_affine(
-//                                     info, baff.EffectiveAffine(col), ...);
+//                                     info, grid.EffectiveAffine(col, row),
+//                                     ...);
 //     back-projection / rays:     rpc_ray_affine(
-//                                     info, init, baff.EffectiveAffine(col),
+//                                     info, init,
+//                                     grid.EffectiveAffine(col, row),
 //                                     col, row, h_lo, h_hi, ray);
 //
-// The EffectiveAffine col for BACK-projection is the observed pixel's col:
-// the shift varies slowly with col, so the slope-times-shift error of
-// un-applying at the observed col rather than the exact pre-correction col
-// is milli-pixel scale.
+// The EffectiveAffine (col, row) for BACK-projection are the observed
+// pixel's: the shift varies slowly, so the slope-times-shift error of
+// un-applying at the observed pixel rather than the exact pre-correction
+// one is milli-pixel scale.
 //
-// Uniqueness note: on the band-center span the composite correction is
+// Uniqueness note: on the cell-center spans the composite correction is
 // uniquely determined by the solve, but in the constant-extension zones
 // beyond the outermost centers an affine tilt trades against per-point
 // ground gradients -- there the composite is only as good as the local
-// data anchor. Keep the outer band centers near the scene's col edges
-// (uniform tiling already does: the extension zones are half a band wide).
-class RpcAffineBanded {
+// data anchor. Keep the outer cell centers near the scene's edges
+// (uniform tiling already does: the extension zones are half a cell
+// wide).
+class RpcAffineGridded {
 public:
-    // One band's correction: columns [col_lo, col_hi) shift by (dx, dy) px.
-    struct Band {
+    // One cell's correction: pixels in [col_lo, col_hi) x [row_lo, row_hi)
+    // shift by (dx, dy) px.
+    struct Cell {
         double col_lo = 0.0;
         double col_hi = 0.0;
+        double row_lo = 0.0;
+        double row_hi = 0.0;
         double dx = 0.0;
         double dy = 0.0;
     };
 
-    // Storage cap (bands per scene); raise if a scene ever needs finer
-    // banding. 32 uniform bands over a 100000-sample scene is ~3100
-    // samples per band -- far finer than any practical cross-track
-    // structure.
-    static constexpr int kMaxBands = 32;
+    // Storage cap (cells per scene); raise if a scene ever needs a finer
+    // grid. 64 cells covers an 8x8 grid -- over a ~30000 x 50000 px
+    // scene that is finer than any practical 2D systematic structure.
+    static constexpr int kMaxCells = 64;
 
-    // Identity affine with no bands.
-    RpcAffineBanded() = default;
+    // Identity affine with no cells.
+    RpcAffineGridded() = default;
 
-    // Host-side assembly: takes the bands in any order (sorted by column
-    // center internally), validates the count against kMaxBands and each
-    // band's col range. Nullopt on violation.
-    static std::optional<RpcAffineBanded> Make(const RpcAffine& affine,
-                                               std::vector<Band> bands,
-                                               RpcAffineBandBasis basis);
+    // Host-side assembly: takes the cells in any order (sorted into
+    // canonical row-major order internally), validates the count against
+    // kMaxCells, every cell's ranges, and (under Linear) the regular
+    // tensor structure. Nullopt on violation.
+    static std::optional<RpcAffineGridded> Make(const RpcAffine& affine,
+                                                std::vector<Cell> cells,
+                                                RpcAffineGridBasis basis);
 
-    // Uniform convenience: `num_bands` equal-width zero-shift bands tiling
-    // [col_lo, col_hi) around `affine` -- the fresh-solve starting point
-    // for solve_rpc_bundle_adjust_banded. Nullopt on the same violations.
-    static std::optional<RpcAffineBanded> MakeUniform(const RpcAffine& affine,
-                                                      double col_lo,
-                                                      double col_hi,
-                                                      int num_bands,
-                                                      RpcAffineBandBasis basis);
+    // Uniform column banding: `num_col` equal-width zero-shift cells
+    // tiling [col_lo, col_hi) around `affine`, the row axis degenerate
+    // (one row band; the shift does not depend on row) -- the
+    // cross-track-only model and the fresh-solve starting point for
+    // solve_rpc_bundle_adjust_gridded. Nullopt on the same violations.
+    static std::optional<RpcAffineGridded> MakeUniform(
+        const RpcAffine& affine,
+        double col_lo,
+        double col_hi,
+        int num_col,
+        RpcAffineGridBasis basis);
 
-    ZT_HOST_DEVICE int num_bands() const noexcept { return num_bands_; }
+    // Uniform 2D convenience: a `num_col` x `num_row` grid of equal
+    // zero-shift cells tiling [col_lo, col_hi) x [row_lo, row_hi) around
+    // `affine` -- the fresh-solve starting point for the 2D model.
+    static std::optional<RpcAffineGridded> MakeUniform2D(
+        const RpcAffine& affine,
+        double col_lo,
+        double col_hi,
+        double row_lo,
+        double row_hi,
+        int num_col,
+        int num_row,
+        RpcAffineGridBasis basis);
+
+    ZT_HOST_DEVICE int num_cells() const noexcept { return num_cells_; }
     ZT_HOST_DEVICE const RpcAffine& affine() const noexcept { return affine_; }
-    ZT_HOST_DEVICE RpcAffineBandBasis basis() const noexcept { return basis_; }
-    ZT_HOST_DEVICE const Band& band(int i) const noexcept {
-        return bands_[static_cast<std::size_t>(i)];
+    ZT_HOST_DEVICE RpcAffineGridBasis basis() const noexcept { return basis_; }
+    ZT_HOST_DEVICE const Cell& cell(int i) const noexcept {
+        return cells_[static_cast<std::size_t>(i)];
     }
+    // Cells per grid row of the canonical (regular, row-major) layout.
+    ZT_HOST_DEVICE int num_cols() const noexcept { return num_cols_; }
 
-    // Host-side mutators, the in/out path of solve_rpc_bundle_adjust_banded
-    // (band structure stays fixed; only the values move). set_band_shift
-    // indexes bands in the stored (center-sorted) order.
+    // Host-side mutators, the in/out path of solve_rpc_bundle_adjust_
+    // gridded (grid structure stays fixed; only the values move).
+    // set_cell_shift indexes cells in the stored canonical order.
     void set_affine(const RpcAffine& affine) noexcept { affine_ = affine; }
-    void set_band_shift(int i, double dx, double dy) noexcept {
-        Band& b = bands_[static_cast<std::size_t>(i)];
-        b.dx = dx;
-        b.dy = dy;
+    void set_cell_shift(int i, double dx, double dy) noexcept {
+        Cell& c = cells_[static_cast<std::size_t>(i)];
+        c.dx = dx;
+        c.dy = dy;
     }
 
-    // The blended shift at one col, per the basis: the containing (else
-    // nearest) band under Constant, the tent interpolation between the two
-    // bracketing centers (constant extension outside them) under Linear.
-    // Zero when there are no bands.
-    ZT_HOST_DEVICE void ShiftAt(double col, double& dx, double& dy) const {
+    // The blended shift at one pixel, per the basis: the containing (else
+    // nearest-center) cell under Constant, the bilinear interpolation
+    // between the four bracketing centers (constant extension outside
+    // the center spans, per axis) under Linear. Zero when there are no
+    // cells.
+    ZT_HOST_DEVICE void ShiftAt(double col,
+                                double row,
+                                double& dx,
+                                double& dy) const {
         dx = 0.0;
         dy = 0.0;
-        if (num_bands_ == 0) {
+        if (num_cells_ == 0) {
             return;
         }
-        if (basis_ == RpcAffineBandBasis::Constant) {
+        if (basis_ == RpcAffineGridBasis::Constant) {
             int pick = -1;
-            for (int i = 0; i < num_bands_; ++i) {
-                const Band& b = bands_[static_cast<std::size_t>(i)];
-                if (col >= b.col_lo && col < b.col_hi) {
+            for (int i = 0; i < num_cells_; ++i) {
+                const Cell& c = cells_[static_cast<std::size_t>(i)];
+                if (col >= c.col_lo && col < c.col_hi && row >= c.row_lo &&
+                    row < c.row_hi) {
                     pick = i;
                     break;
                 }
             }
             if (pick < 0) {
-                // Outside every band: nearest center.
+                // Outside every cell: nearest center (pixel-space 2D
+                // distance).
                 double best = HUGE_VAL;
-                for (int i = 0; i < num_bands_; ++i) {
-                    const double d = fabs(Center(i) - col);
+                for (int i = 0; i < num_cells_; ++i) {
+                    const double dc = ColCenter(i) - col;
+                    const double dr = RowCenter(i) - row;
+                    const double d = (dc * dc) + (dr * dr);
                     if (d < best) {
                         best = d;
                         pick = i;
                     }
                 }
             }
-            dx = bands_[static_cast<std::size_t>(pick)].dx;
-            dy = bands_[static_cast<std::size_t>(pick)].dy;
+            dx = cells_[static_cast<std::size_t>(pick)].dx;
+            dy = cells_[static_cast<std::size_t>(pick)].dy;
             return;
         }
-        // Linear (tent) basis over the center-sorted bands.
-        int j = 0;
-        while (j < num_bands_ && Center(j) < col) {
-            ++j;
+        // Linear (tensor tent) basis over the regular row-major grid:
+        // bracket each axis by its centers (constant extension outside a
+        // center span collapses to the boundary cell), then blend the up
+        // to four bracketing cells with the tent weights.
+        int ic = 0;
+        int jc = 0;
+        double wci = 1.0;
+        double wcj = 0.0;
+        if (num_cols_ > 1) {
+            while (jc < num_cols_ && ColCenter(jc) < col) {
+                ++jc;
+            }
+            if (jc == 0 || jc == num_cols_) {
+                ic = jc = (jc == 0) ? 0 : num_cols_ - 1;
+                wci = 1.0;
+                wcj = 0.0;
+            } else {
+                ic = jc - 1;
+                const double span = ColCenter(jc) - ColCenter(ic);
+                if (!(span > 0.0)) {
+                    ic = jc;
+                    wci = 1.0;
+                    wcj = 0.0;
+                } else {
+                    wci = (ColCenter(jc) - col) / span;
+                    wcj = 1.0 - wci;
+                }
+            }
         }
-        if (j == 0 || j == num_bands_) {
-            // Constant extension outside the center span.
-            const Band& b =
-                bands_[static_cast<std::size_t>(j == 0 ? 0 : num_bands_ - 1)];
-            dx = b.dx;
-            dy = b.dy;
-            return;
+        const int rows = num_cells_ / num_cols_;
+        int ir = 0;
+        int jr = 0;
+        double wri = 1.0;
+        double wrj = 0.0;
+        if (rows > 1) {
+            while (jr < rows && RowCenter(jr * num_cols_) < row) {
+                ++jr;
+            }
+            if (jr == 0 || jr == rows) {
+                ir = jr = (jr == 0) ? 0 : rows - 1;
+                wri = 1.0;
+                wrj = 0.0;
+            } else {
+                ir = jr - 1;
+                const double span =
+                    RowCenter(jr * num_cols_) - RowCenter(ir * num_cols_);
+                if (!(span > 0.0)) {
+                    ir = jr;
+                    wri = 1.0;
+                    wrj = 0.0;
+                } else {
+                    wri = (RowCenter(jr * num_cols_) - row) / span;
+                    wrj = 1.0 - wri;
+                }
+            }
         }
-        const int i = j - 1;
-        const double span = Center(j) - Center(i);
-        if (!(span > 0.0)) {
-            const Band& b = bands_[static_cast<std::size_t>(j)];
-            dx = b.dx;
-            dy = b.dy;
-            return;
+        const int idx[2][2] = {{ir * num_cols_ + ic, ir * num_cols_ + jc},
+                               {jr * num_cols_ + ic, jr * num_cols_ + jc}};
+        const double w[2][2] = {{wri * wci, wri * wcj}, {wrj * wci, wrj * wcj}};
+        for (int a = 0; a < 2; ++a) {
+            for (int b = 0; b < 2; ++b) {
+                const Cell& c = cells_[static_cast<std::size_t>(idx[a][b])];
+                dx += w[a][b] * c.dx;
+                dy += w[a][b] * c.dy;
+            }
         }
-        const double w = (Center(j) - col) / span;
-        const Band& lo = bands_[static_cast<std::size_t>(i)];
-        const Band& hi = bands_[static_cast<std::size_t>(j)];
-        dx = (w * lo.dx) + ((1.0 - w) * hi.dx);
-        dy = (w * lo.dy) + ((1.0 - w) * hi.dy);
     }
 
-    // The affine with the shift at `col` folded into the translations --
-    // the composition point with rpc_forward_point_affine / rpc_ray_affine.
-    ZT_HOST_DEVICE RpcAffine EffectiveAffine(double col) const {
+    // The affine with the shift at (col, row) folded into the
+    // translations -- the composition point with rpc_forward_point_affine
+    // / rpc_ray_affine.
+    ZT_HOST_DEVICE RpcAffine EffectiveAffine(double col, double row) const {
         RpcAffine eff = affine_;
         double dx = 0.0;
         double dy = 0.0;
-        ShiftAt(col, dx, dy);
+        ShiftAt(col, row, dx, dy);
         eff.p[0] += dx;
         eff.p[3] += dy;
         return eff;
@@ -294,67 +375,129 @@ public:
         affine_.Apply(col, row, out_col, out_row);
         double dx = 0.0;
         double dy = 0.0;
-        ShiftAt(col, dx, dy);
+        ShiftAt(col, row, dx, dy);
         out_col += dx;
         out_row += dy;
     }
 
 private:
-    ZT_HOST_DEVICE double Center(int i) const {
-        const Band& b = bands_[static_cast<std::size_t>(i)];
-        return 0.5 * (b.col_lo + b.col_hi);
+    ZT_HOST_DEVICE double ColCenter(int i) const {
+        const Cell& c = cells_[static_cast<std::size_t>(i)];
+        return 0.5 * (c.col_lo + c.col_hi);
+    }
+    ZT_HOST_DEVICE double RowCenter(int i) const {
+        const Cell& c = cells_[static_cast<std::size_t>(i)];
+        return 0.5 * (c.row_lo + c.row_hi);
     }
 
     RpcAffine affine_;
-    RpcAffineBandBasis basis_ = RpcAffineBandBasis::Linear;
-    int num_bands_ = 0;
-    std::array<Band, static_cast<std::size_t>(kMaxBands)> bands_{};
+    RpcAffineGridBasis basis_ = RpcAffineGridBasis::Linear;
+    int num_cells_ = 0;
+    int num_cols_ = 1;  // cells per grid row (canonical tensor layout)
+    std::array<Cell, static_cast<std::size_t>(kMaxCells)> cells_{};
 };
 
-inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
+inline std::optional<RpcAffineGridded> RpcAffineGridded::Make(
     const RpcAffine& affine,
-    std::vector<Band> bands,
-    RpcAffineBandBasis basis) {
-    if (bands.size() > static_cast<std::size_t>(kMaxBands)) {
+    std::vector<Cell> cells,
+    RpcAffineGridBasis basis) {
+    if (cells.size() > static_cast<std::size_t>(kMaxCells)) {
         return std::nullopt;
     }
-    for (const Band& b : bands) {
-        if (!(b.col_lo < b.col_hi)) {
+    for (const Cell& c : cells) {
+        if (!(c.col_lo < c.col_hi) || !(c.row_lo < c.row_hi)) {
             return std::nullopt;
         }
     }
-    std::sort(bands.begin(), bands.end(), [](const Band& a, const Band& b) {
-        return (a.col_lo + a.col_hi) < (b.col_lo + b.col_hi);
+    const auto RowKey = [](const Cell& c) { return c.row_lo + c.row_hi; };
+    const auto ColKey = [](const Cell& c) { return c.col_lo + c.col_hi; };
+    std::sort(cells.begin(), cells.end(), [&](const Cell& a, const Cell& b) {
+        if (RowKey(a) != RowKey(b)) {
+            return RowKey(a) < RowKey(b);
+        }
+        return ColKey(a) < ColKey(b);
     });
-    RpcAffineBanded out;
+    // Detect the tensor layout: cells per grid row = the leading run
+    // sharing a row key. Linear requires every row to carry the same
+    // column keys (exact doubles -- MakeUniform2D's arithmetic is
+    // row-invariant); Constant accepts any layout and never reads
+    // num_cols_.
+    std::size_t num_col = 0;
+    while (num_col < cells.size() &&
+           RowKey(cells[num_col]) == RowKey(cells[0])) {
+        ++num_col;
+    }
+    bool regular = (cells.size() % num_col) == 0;
+    if (regular && basis == RpcAffineGridBasis::Linear) {
+        const std::size_t rows = cells.size() / num_col;
+        for (std::size_t r = 0; r < rows && regular; ++r) {
+            for (std::size_t c = 0; c < num_col; ++c) {
+                if (RowKey(cells[r * num_col + c]) !=
+                        RowKey(cells[r * num_col]) ||
+                    ColKey(cells[r * num_col + c]) != ColKey(cells[c])) {
+                    regular = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (!regular && basis == RpcAffineGridBasis::Linear) {
+        return std::nullopt;
+    }
+    RpcAffineGridded out;
     out.affine_ = affine;
     out.basis_ = basis;
-    out.num_bands_ = static_cast<int>(bands.size());
-    for (std::size_t i = 0; i < bands.size(); ++i) {
-        out.bands_[i] = bands[i];
+    out.num_cells_ = static_cast<int>(cells.size());
+    out.num_cols_ = static_cast<int>(num_col);
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        out.cells_[i] = cells[i];
     }
     return out;
 }
 
-inline std::optional<RpcAffineBanded> RpcAffineBanded::MakeUniform(
+inline std::optional<RpcAffineGridded> RpcAffineGridded::MakeUniform(
     const RpcAffine& affine,
     double col_lo,
     double col_hi,
-    int num_bands,
-    RpcAffineBandBasis basis) {
-    if (num_bands < 0 || num_bands > kMaxBands || !(col_lo < col_hi)) {
+    int num_col,
+    RpcAffineGridBasis basis) {
+    // Degenerate row axis: one row band [0, 1) -- the row coordinate
+    // never changes the shift (it clamps to the single row center under
+    // Linear, and Constant's containment/nearest gives the same cell).
+    return MakeUniform2D(affine, col_lo, col_hi, 0.0, 1.0, num_col, 1, basis);
+}
+
+inline std::optional<RpcAffineGridded> RpcAffineGridded::MakeUniform2D(
+    const RpcAffine& affine,
+    double col_lo,
+    double col_hi,
+    double row_lo,
+    double row_hi,
+    int num_col,
+    int num_row,
+    RpcAffineGridBasis basis) {
+    if (num_col < 1 || num_row < 1 || num_col > kMaxCells ||
+        num_row > kMaxCells || num_col * num_row > kMaxCells ||
+        !(col_lo < col_hi) || !(row_lo < row_hi)) {
         return std::nullopt;
     }
-    std::vector<Band> bands(static_cast<std::size_t>(num_bands));
-    for (int i = 0; i < num_bands; ++i) {
-        const double lo = col_lo + (col_hi - col_lo) * static_cast<double>(i) /
-                                       static_cast<double>(num_bands);
-        const double hi = col_lo + (col_hi - col_lo) *
-                                       static_cast<double>(i + 1) /
-                                       static_cast<double>(num_bands);
-        bands[static_cast<std::size_t>(i)] = Band{lo, hi, 0.0, 0.0};
+    std::vector<Cell> cells(static_cast<std::size_t>(num_col * num_row));
+    for (int r = 0; r < num_row; ++r) {
+        for (int c = 0; c < num_col; ++c) {
+            cells[static_cast<std::size_t>(r * num_col + c)] =
+                Cell{col_lo + (col_hi - col_lo) * static_cast<double>(c) /
+                                  static_cast<double>(num_col),
+                     col_lo + (col_hi - col_lo) * static_cast<double>(c + 1) /
+                                  static_cast<double>(num_col),
+                     row_lo + (row_hi - row_lo) * static_cast<double>(r) /
+                                  static_cast<double>(num_row),
+                     row_lo + (row_hi - row_lo) * static_cast<double>(r + 1) /
+                                  static_cast<double>(num_row),
+                     0.0,
+                     0.0};
+        }
     }
-    return Make(affine, std::move(bands), basis);
+    return Make(affine, std::move(cells), basis);
 }
 
 // How many affine parameters per image the solver floats; the enum value is

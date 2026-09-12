@@ -113,6 +113,20 @@ struct RpcBaOptions {
     // disables. Under zero_mean_affines it regularizes the differential
     // parameters only.
     double affine_prior_weight = 0.0;
+    // Pixel-unit identity prior (a sigma in px); 0 disables. Unlike
+    // affine_prior_weight -- which scales the RAW parameters and so
+    // barely touches the ~1-scale linear terms -- this maps every affine
+    // deviation to the pixel shift it causes at the RPC validity domain's
+    // edge (translations directly, linear terms times samp_scale /
+    // line_scale) before weighting. That is the deviation that matters
+    // physically: a 1e-4 e1 drift is invisible to a unit-weight parameter
+    // prior yet tilts a 100000 px scene edge by 10 px. Use this whenever
+    // the RPC absolute georeferencing is trusted to a few pixels
+    // (typical for satellite products, unlike aerial blocks that need a
+    // fully free adjustment): e.g. 2.0 px keeps the solve near identity
+    // while still absorbing genuine few-pixel biases. Recommended for
+    // stage 1 of the two-stage gridded solve (see below).
+    double identity_prior_px = 0.0;
     // Constrain the V affines' MEAN to the identity exactly by deriving the
     // last view's affine from the others (see the file comment). The
     // caller's initial affine for the last view is overruled by the
@@ -154,83 +168,136 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
                                     std::vector<RpcAffine>& affines,
                                     const RpcBaOptions& options = {});
 
-// ========================= banded variant =================================
+// ========================= gridded variant ================================
 //
-// solve_rpc_bundle_adjust_banded(): one GLOBAL affine per scene plus a
-// per-band TRANSLATION shift, banded along the pixel COLUMN axis -- the
-// camera model for cross-track systematic error (error that varies across
-// the detector array: CCD-segment stitching offsets, array-internal
-// distortion; in image terms, columns disagree while the along-track row
-// direction -- the time axis -- stays clean, and a per-scene affine has
-// already absorbed the constant and col-LINEAR parts). The band shifts
-// absorb the remaining col structure as a piecewise-constant or
-// piecewise-linear function of the pixel col:
+// solve_rpc_bundle_adjust_gridded(): one GLOBAL affine per scene plus a
+// per-cell TRANSLATION shift over a 2D column x row grid -- the camera
+// model for 2D-structured systematic error (cross-track detector-array
+// structure -- CCD-segment stitching offsets, array-internal distortion
+// -- plus any along-track variation; a per-scene affine has already
+// absorbed the constant and linear parts of both). The cell shifts absorb
+// the remaining structure as a piecewise-constant or piecewise-bilinear
+// function of the pixel (col, row):
 //
-//     col' = (e0 + dx_band) + e1*col + e2*row
-//     row' = (f0 + dy_band) + f1*col + f2*row
+//     col' = (e0 + dx_cell) + e1*col + e2*row
+//     row' = (f0 + dy_cell) + f1*col + f2*row
 //
-// The corrections travel as RpcAffineBanded values (rpc_affine.hpp) -- one
-// object per scene, in and out: pass identity affines with zero-shift
-// bands for a fresh solve (RpcAffineBanded::MakeUniform), or previous
+// The corrections travel as RpcAffineGridded values (rpc_affine.hpp) --
+// one object per scene, in and out: pass identity affines with zero-shift
+// grids for a fresh solve (RpcAffineGridded::MakeUniform2D, or
+// MakeUniform for column-only banding -- a one-row grid), or previous
 // solutions to warm-start. The returned objects are the complete
 // downstream correction (Apply / EffectiveAffine); nothing else needs
-// assembling. Each scene blends its bands per ITS object's basis, so
-// Linear and Constant scenes may be mixed; a scene with NO bands is a
-// plain per-view affine scene and may be mixed with banded ones.
+// assembling. Each scene blends its cells per ITS object's basis, so
+// Linear and Constant scenes may be mixed; a scene with NO cells is a
+// plain per-view affine scene and may be mixed with gridded ones.
 //
 // Parameterization internals (exact, no soft constraints):
-//   * The band shifts are ZERO-MEAN within each scene: each scene's
-//     highest-center (rightmost) band derives its shift from the others. This
-//     removes the exact degeneracy between the scene affine's translation and
-//     the mean of its band shifts, and means the effective per-band translation
-//     is scene translation + zero-mean wave. A scene with a single band has its
-//     shift pinned to zero (no wave structure to resolve).
+//   * The cell shifts are ZERO-MEAN within each scene: the canonically
+//     last cell (bottom-right) derives its shift from the others. This
+//     removes the exact degeneracy between the scene affine's
+//     translation and the mean of its cell shifts. A scene with a single
+//     cell has its shift pinned to zero (no structure to resolve).
 //   * zero_mean_affines, when set, generalizes to "the MEAN of the scene
-//     affines is the identity" (the last scene's affine is derived from the
-//     others; the caller's initial affine for it is overruled).
+//     affines is the identity" (the last scene's affine is derived from
+//     the others; the caller's initial affine for it is overruled).
+//     Ignored under fix_scene_affines (the affines are constants).
 //
 // Observability caveat (stronger than the plain solver's): with matches
-// only, every col region carries its own horizontal common mode -- the
-// bands covering those columns in ALL scenes can drift together, the
-// ground blocks absorb it, and zero-mean does not touch it. Anchor with
-// GCPs spread across the columns, or with band_shift_prior_weight (a
+// only, every 2D cell region carries its own horizontal common mode --
+// the cells covering that region in ALL scenes can drift together, the
+// ground blocks absorb it, and zero-mean does not touch it; a region
+// left without an anchor drifts by whole pixels (demonstrated in the
+// gridded example). Anchor with at least one GCP per cell region, or
+// with cell_shift_prior_weight (a
 // Tikhonov prior that pins the drift to "no correction relative to the
-// scene affine"); per-point DEM heights pin the height direction as usual.
+// scene affine"); per-point DEM heights pin the height direction as
+// usual. The cell count multiplies this exposure: prefer the coarsest
+// grid that absorbs the error (the two-stage flow below usually needs
+// far fewer cells than a joint solve suggests).
 //
 // Measures reference SCENES (RpcBaMeasure::view indexes `scenes`, not
-// bands): a measure's band follows from its pixel col, so ordinary
-// multi-scene match networks plug in unchanged. Columns outside a scene's
-// band range clamp to the nearest band (constant extension under
-// RpcAffineBandBasis::Linear).
+// cells): a measure's cell follows from its pixel (col, row), so ordinary
+// multi-scene match networks plug in unchanged. Pixels outside a scene's
+// grid clamp to the nearest cell/center (constant extension under
+// RpcAffineGridBasis::Linear).
 //
-// Approximation power: fitting a full-period wave of amplitude A with N
-// bands leaves ~A*pi^2/(2N^2) px (Linear basis) -- N=12, A=5 px gives
-// ~0.17 px. The corrected composite (RPC + scene affine + band shift)
-// should stay beside the RPC as separate correction layers; folding it
-// back into refitted RPC coefficients re-smears the wave (a cubic
-// rational polynomial cannot carry it).
+// Approximation power (Linear basis): fitting a full-period wave of
+// amplitude A with N cells along its axis leaves ~A*pi^2/(2N^2) px --
+// N=12, A=5 px gives ~0.17 px. The corrected composite (RPC + scene
+// affine + cell shift) should stay beside the RPC as separate correction
+// layers; folding it back into refitted RPC coefficients re-smears the
+// structure (a cubic rational polynomial cannot carry it).
+//
+// ======================= two-stage variant =================================
+//
+// solve_rpc_bundle_adjust_two_stage(): the recommended driver for
+// satellite RPC refinement, where the absolute georeferencing is near
+// correct and only a few pixels of local structure need absorbing --
+// unlike aerial blocks, where a single fully free affine adjustment is
+// the classical model. One joint affine+grid solve lets the scene
+// affine drift/tilt arbitrarily (the gauge directions above are only
+// zero-mean-constrained; weak anchoring lets the affine soak up local
+// structure and swing whole scenes), so the decomposition is staged:
+//
+//   stage 1  global affine only, held NEAR IDENTITY by identity_prior_px
+//            (pixel-unit deviations; set it to the trusted absolute
+//            accuracy of the RPC products, e.g. 2-3 px),
+//   stage 2  the affine FROZEN at stage 1's solution; only the cells'
+//            translation shifts float (zero-mean per scene), absorbing
+//            the remaining few-pixel local structure.
+//
+// Because a >=2x2 tent grid spans every affine function on the center
+// span, the frozen-affine composite reaches the same fit a joint solve
+// would -- the staging pins the DECOMPOSITION, not the correction. Each
+// stage is also usable standalone (solve_rpc_bundle_adjust with
+// identity_prior_px; solve_rpc_bundle_adjust_gridded with
+// fix_scene_affines) for warm-started or custom pipelines.
 
-// Banded options: the plain RpcBaOptions knobs plus the band-specific
-// ones. `dof` restricts the scene affines only (the band shifts are always
-// 2-parameter translations); the blending basis lives on each scene's
-// RpcAffineBanded object, not here.
-struct RpcBaBandedOptions : RpcBaOptions {
-    // Tikhonov weight pulling each free band shift towards zero (i.e.
+// Gridded options: the plain RpcBaOptions knobs plus the grid-specific
+// ones. `dof` restricts the scene affines only (the cell shifts are
+// always 2-parameter translations); the blending basis lives on each
+// scene's RpcAffineGridded object, not here.
+struct RpcBaGridOptions : RpcBaOptions {
+    // Tikhonov weight pulling each free cell shift towards zero (i.e.
     // towards the scene affine alone). 0 disables. Recommended for
-    // matches-only banded solves (see the observability caveat above) and
-    // for bands weakly covered by matches or GCPs.
-    double band_shift_prior_weight = 0.0;
+    // matches-only gridded solves (see the observability caveat above)
+    // and for cells weakly covered by matches or GCPs.
+    double cell_shift_prior_weight = 0.0;
+    // Hold every scene's affine CONSTANT at the incoming value and float
+    // only the cell shifts -- stage 2 of the two-stage flow. The affine
+    // prior knobs and zero_mean_affines are then moot (ignored).
+    bool fix_scene_affines = false;
 };
 
-// Banded solve: float every scene's global affine plus its bands'
-// translation shifts against the control network. `corrected` carries one
-// RpcAffineBanded per scene (parallel to `scenes`): its affine and band
-// shifts are the initial guess and are overwritten only on success (the
-// band structure -- row ranges, count, basis -- is taken as given).
-RpcBaReport solve_rpc_bundle_adjust_banded(
+// Gridded solve: float every scene's global affine plus its cells'
+// translation shifts against the control network. `corrected` carries
+// one RpcAffineGridded per scene (parallel to `scenes`): its affine and
+// cell shifts are the initial guess and are overwritten only on success
+// (the grid structure -- cell ranges, count, basis -- is taken as
+// given).
+RpcBaReport solve_rpc_bundle_adjust_gridded(
     const std::vector<RpcInfo>& scenes,
     const std::vector<RpcBaPoint>& points,
-    std::vector<RpcAffineBanded>& corrected,
-    const RpcBaBandedOptions& options = {});
+    std::vector<RpcAffineGridded>& corrected,
+    const RpcBaGridOptions& options = {});
+
+// Two-stage report: each stage's plain report, in order. The final
+// corrections live in `corrected` (stage 1's affine + stage 2's shifts).
+struct RpcBaTwoStageReport {
+    RpcBaReport affine_stage;
+    RpcBaReport grid_stage;
+};
+
+// Two-stage solve (see the notes above): stage 1 floats the global
+// affines under the pixel-unit identity prior, stage 2 freezes them and
+// floats the cell shifts. `corrected` carries one RpcAffineGridded per
+// scene; its affine is stage 1's in/out value and its cells are stage
+// 2's. The stage reports land in the two-stage report; `ok` per stage.
+RpcBaTwoStageReport solve_rpc_bundle_adjust_two_stage(
+    const std::vector<RpcInfo>& scenes,
+    const std::vector<RpcBaPoint>& points,
+    std::vector<RpcAffineGridded>& corrected,
+    const RpcBaGridOptions& options = {});
 
 }  // namespace zproj::crs
