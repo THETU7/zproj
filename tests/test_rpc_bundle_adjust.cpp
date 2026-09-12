@@ -14,6 +14,7 @@
 // solver, and the zero-mean / GCP / DEM-height tests cover the N-view gauge
 // handling.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <random>
@@ -576,15 +577,17 @@ using zproj::crs::RpcAffineBanded;
 using zproj::crs::RpcBaBandedOptions;
 using zproj::crs::solve_rpc_bundle_adjust_banded;
 
-// The synthetic models' row span: rows land in [0, 2*line_off] = [0, 50000].
-constexpr double kRowSpan = 50000.0;
+// The synthetic models' col span: cols land in
+// [samp_off - 0.5*samp_scale, samp_off + 0.5*samp_scale] = [25000, 75000].
+constexpr double kColLo = 25000.0;
+constexpr double kColHi = 75000.0;
 
-// One full-period row wave: max at the top/bottom rows, min at the middle,
-// zeros at the quarter rows -- the observed wavy-error pattern. Evaluated
-// at the RAW RPC row (before any affine).
-double RowWave(double row, double amp) {
+// One full-period col wave: max at the left/right cols, min at the middle,
+// zeros at the quarter cols -- the cross-track error pattern. Evaluated at
+// the RAW RPC col (before any affine).
+double ColWave(double col, double amp) {
     constexpr double kTwoPi = 6.2831853071795865;
-    return amp * std::cos(kTwoPi * row / kRowSpan);
+    return amp * std::cos(kTwoPi * (col - kColLo) / (kColHi - kColLo));
 }
 
 // Like MakeNetwork, plus a wave term added to every corrupted pixel (the
@@ -620,8 +623,8 @@ Network MakeWaveNetwork(const std::vector<RpcInfo>& views,
                               out.pts[i].alt,
                               c,
                               r);
-            const double wave_c = RowWave(r, col_amp);
-            const double wave_r = RowWave(r, row_amp);
+            const double wave_c = ColWave(c, col_amp);
+            const double wave_r = ColWave(c, row_amp);
             truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
             c += wave_c + noise(rng);
             r += wave_r + noise(rng);
@@ -653,8 +656,8 @@ std::vector<RpcBaPoint> MakeWaveGcps(const std::vector<RpcInfo>& views,
             double c = 0.0;
             double r = 0.0;
             rpc_forward_point(views[v], p.lon, p.lat, p.alt, c, r);
-            const double wave_c = RowWave(r, col_amp);
-            const double wave_r = RowWave(r, row_amp);
+            const double wave_c = ColWave(c, col_amp);
+            const double wave_r = ColWave(c, row_amp);
             truth[v].Apply(c, r, c, r);
             pt.measures.push_back(RpcBaMeasure{static_cast<int>(v),
                                                c + wave_c + noise(rng),
@@ -665,8 +668,36 @@ std::vector<RpcBaPoint> MakeWaveGcps(const std::vector<RpcInfo>& views,
     return gcps;
 }
 
+// Point indices at COLUMN strides: project each ground point through view
+// 0, sort by col, take `n` even strides. GCPs anchor the per-col-region
+// common modes (see rpc_bundle_adjust.hpp), so the anchors must SPREAD
+// across the columns, not cluster by luck of the draw.
+std::vector<std::size_t> ColStridedIndices(const std::vector<RpcInfo>& views,
+                                           const std::vector<Pt>& pts,
+                                           std::size_t n) {
+    std::vector<std::size_t> order(pts.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    const auto ColIn = [&](std::size_t i) {
+        double c = 0.0;
+        double r = 0.0;
+        rpc_forward_point(views[0], pts[i].lon, pts[i].lat, pts[i].alt, c, r);
+        return c;
+    };
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return ColIn(a) < ColIn(b);
+    });
+    std::vector<std::size_t> out;
+    out.reserve(n);
+    for (std::size_t k = 0; k < n && !order.empty(); ++k) {
+        out.push_back(order[(k * order.size()) / n]);
+    }
+    return out;
+}
+
 // The fresh-solve starting point: identity affines with `bands_per_scene`
-// uniform zero-shift tent bands per scene, tiled over the row span.
+// uniform zero-shift tent bands per scene, tiled over the col span.
 std::vector<RpcAffineBanded> FreshBandedNet(int num_scenes,
                                             int bands_per_scene,
                                             RpcAffineBandBasis basis) {
@@ -674,7 +705,7 @@ std::vector<RpcAffineBanded> FreshBandedNet(int num_scenes,
                                      RpcAffineBanded{});
     for (int s = 0; s < num_scenes; ++s) {
         net[static_cast<std::size_t>(s)] = *RpcAffineBanded::MakeUniform(
-            RpcAffine::Identity(), 0.0, kRowSpan, bands_per_scene, basis);
+            RpcAffine::Identity(), kColLo, kColHi, bands_per_scene, basis);
     }
     return net;
 }
@@ -690,7 +721,10 @@ TEST(SolveRpcBundleAdjustBanded, RecoversWaveTentWithGcps) {
     constexpr double kRowAmp = 3.0;
     Network data =
         MakeWaveNetwork(views, truth, kColAmp, kRowAmp, 150, 3, 0.0, 5);
-    const std::vector<Pt> gcp_pts(data.pts.begin(), data.pts.begin() + 8);
+    std::vector<Pt> gcp_pts;
+    for (std::size_t idx : ColStridedIndices(views, data.pts, 8)) {
+        gcp_pts.push_back(data.pts[idx]);
+    }
     const std::vector<RpcBaPoint> gcps =
         MakeWaveGcps(views, truth, kColAmp, kRowAmp, gcp_pts, 0.0, 9);
     data.points.insert(data.points.end(), gcps.begin(), gcps.end());
@@ -706,26 +740,34 @@ TEST(SolveRpcBundleAdjustBanded, RecoversWaveTentWithGcps) {
     // Tent approximation error ~0.15 px at these amplitudes.
     EXPECT_GT(report.rms_before_px, 3.0);
     EXPECT_LT(report.rms_after_px, 0.3);
-    for (int s = 0; s < 3; ++s) {
-        EXPECT_LT(MaxParamDelta(net[static_cast<std::size_t>(s)].affine(),
-                                truth[static_cast<std::size_t>(s)]),
-                  0.5)
-            << "scene " << s;
-    }
-    // The shifts track the wave at the band centers. The budget is above
-    // the rms approximation error: near the wave extrema (top/bottom/
-    // middle rows, where the curvature peaks) the tent fit locally
-    // overshoots and the LS solution re-balances neighboring shifts, so
+    // The COMPOSITE recovers truth affine + wave. The decomposition itself
+    // is not the metric: an affine translation+tilt trades exactly against
+    // a zero-mean ramp in the band shifts (the e1/f1 col-linear terms
+    // against the ramp's slope, the translations against its constant
+    // part), a pure gauge no data can see -- the documented property, the
+    // same invariant the example's worst-case check uses. Budget above the
+    // rms approximation error: near the wave extrema (left/right/middle
+    // cols, where the curvature peaks) the tent fit locally overshoots, so
     // individual control values deviate more than the overall rms.
     for (int s = 0; s < 3; ++s) {
         const RpcAffineBanded& obj = net[static_cast<std::size_t>(s)];
         for (int i = 0; i < obj.num_bands(); ++i) {
             const double center =
-                0.5 * (obj.band(i).row_lo + obj.band(i).row_hi);
-            EXPECT_NEAR(obj.band(i).dx, RowWave(center, kColAmp), 0.5)
-                << "scene " << s << " band " << i << " col shift";
-            EXPECT_NEAR(obj.band(i).dy, RowWave(center, kRowAmp), 0.5)
-                << "scene " << s << " band " << i << " row shift";
+                0.5 * (obj.band(i).col_lo + obj.band(i).col_hi);
+            const RpcAffine eff = obj.EffectiveAffine(center);
+            RpcAffine want = truth[static_cast<std::size_t>(s)];
+            want.p[0] += ColWave(center, kColAmp);
+            want.p[3] += ColWave(center, kRowAmp);
+            double ec = 0.0;
+            double er = 0.0;
+            double wc = 0.0;
+            double wr = 0.0;
+            eff.Apply(center, 25000.0, ec, er);
+            want.Apply(center, 25000.0, wc, wr);
+            EXPECT_NEAR(ec, wc, 0.5)
+                << "scene " << s << " band " << i << " col";
+            EXPECT_NEAR(er, wr, 0.5)
+                << "scene " << s << " band " << i << " row";
         }
     }
 }
@@ -736,7 +778,10 @@ TEST(SolveRpcBundleAdjustBanded, TentBeatsConstant) {
     const std::vector<RpcInfo> views = MakeBaViews(3);
     const std::vector<RpcAffine> truth = MakeTruthAffines(3);
     Network data = MakeWaveNetwork(views, truth, 4.0, 3.0, 150, 3, 0.0, 5);
-    const std::vector<Pt> gcp_pts(data.pts.begin(), data.pts.begin() + 8);
+    std::vector<Pt> gcp_pts;
+    for (std::size_t idx : ColStridedIndices(views, data.pts, 8)) {
+        gcp_pts.push_back(data.pts[idx]);
+    }
     const std::vector<RpcBaPoint> gcps =
         MakeWaveGcps(views, truth, 4.0, 3.0, gcp_pts, 0.0, 9);
     data.points.insert(data.points.end(), gcps.begin(), gcps.end());
@@ -809,10 +854,11 @@ TEST(SolveRpcBundleAdjustBanded, AffineOnlySceneMixesWithBanded) {
                                   data.pts[i].alt,
                                   c,
                                   r);
+                const double raw_c = c;
                 truth[static_cast<std::size_t>(m.view)].Apply(c, r, c, r);
                 if (m.view == 0) {
-                    c += RowWave(r, kColAmp);
-                    r += RowWave(r, kRowAmp);
+                    c += ColWave(raw_c, kColAmp);
+                    r += ColWave(raw_c, kRowAmp);
                 }
                 pt.measures.push_back(RpcBaMeasure{m.view, c, r});
             }
@@ -822,7 +868,10 @@ TEST(SolveRpcBundleAdjustBanded, AffineOnlySceneMixesWithBanded) {
     }
     // GCPs observed in both scenes; only scene 0 carries the wave.
     {
-        const std::vector<Pt> gcp_pts(data.pts.begin(), data.pts.begin() + 8);
+        std::vector<Pt> gcp_pts;
+        for (std::size_t idx : ColStridedIndices(views, data.pts, 8)) {
+            gcp_pts.push_back(data.pts[idx]);
+        }
         for (const Pt& p : gcp_pts) {
             RpcBaPoint pt;
             pt.ground_fixed = true;
@@ -838,10 +887,11 @@ TEST(SolveRpcBundleAdjustBanded, AffineOnlySceneMixesWithBanded) {
                                   pt.height,
                                   c,
                                   r);
+                const double raw_c = c;
                 truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
                 if (v == 0) {
-                    c += RowWave(r, kColAmp);
-                    r += RowWave(r, kRowAmp);
+                    c += ColWave(raw_c, kColAmp);
+                    r += ColWave(raw_c, kRowAmp);
                 }
                 pt.measures.push_back(RpcBaMeasure{v, c, r});
             }
@@ -859,19 +909,30 @@ TEST(SolveRpcBundleAdjustBanded, AffineOnlySceneMixesWithBanded) {
     EXPECT_LT(report.rms_after_px, 0.3);
     EXPECT_EQ(net[1].num_bands(), 0);
     EXPECT_LT(MaxParamDelta(net[1].affine(), truth[1]), 0.5);
-    EXPECT_LT(MaxParamDelta(net[0].affine(), truth[0]), 1.0);
-    // Scene 0's wave is anchored only by its own GCP measures and the
-    // cross-scene ties (scene 1 carries no wave), so the shift tracking
-    // wobbles a bit beyond the pure tent approximation error.
+    // Scene 0's COMPOSITE (not its decomposition -- the affine-tilt-vs-
+    // shift-ramp gauge, see RecoversWaveTentWithGcps) carries the wave,
+    // anchored only by its own GCP measures and the cross-scene ties
+    // (scene 1 carries no wave), so the budget is looser than the pure
+    // tent approximation error.
     for (int i = 0; i < net[0].num_bands(); ++i) {
         const double center =
-            0.5 * (net[0].band(i).row_lo + net[0].band(i).row_hi);
-        EXPECT_NEAR(net[0].band(i).dx, RowWave(center, kColAmp), 1.0)
-            << "band " << i << " col shift";
+            0.5 * (net[0].band(i).col_lo + net[0].band(i).col_hi);
+        const RpcAffine eff = net[0].EffectiveAffine(center);
+        RpcAffine want = truth[0];
+        want.p[0] += ColWave(center, kColAmp);
+        want.p[3] += ColWave(center, kRowAmp);
+        double ec = 0.0;
+        double er = 0.0;
+        double wc = 0.0;
+        double wr = 0.0;
+        eff.Apply(center, 25000.0, ec, er);
+        want.Apply(center, 25000.0, wc, wr);
+        EXPECT_NEAR(ec, wc, 1.0) << "band " << i << " col";
+        EXPECT_NEAR(er, wr, 1.0) << "band " << i << " row";
     }
 }
 
-// No-GCP banded solve: the per-row-region common modes (bands of all
+// No-GCP banded solve: the per-col-region common modes (bands of all
 // scenes drifting together, absorbed by the ground blocks) are invisible
 // to zero-mean -- the band-shift prior is the anchor, per-point DEM
 // heights pin the height direction. The exact constraints hold by
@@ -937,7 +998,7 @@ TEST(SolveRpcBundleAdjustBanded, EmptyScenesRejected) {
 }
 
 // Measures referencing a nonexistent scene drop their point without
-// sinking the solve; rows outside the bands' range clamp to the nearest
+// sinking the solve; columns outside the bands' range clamp to the nearest
 // band.
 TEST(SolveRpcBundleAdjustBanded, MalformedInputSkipped) {
     const std::vector<RpcInfo> views = MakeBaViews(3);
@@ -949,11 +1010,11 @@ TEST(SolveRpcBundleAdjustBanded, MalformedInputSkipped) {
     bad.measures.front().view = 99;
     points.push_back(bad);
 
-    // Bands covering only the middle rows: top/bottom measures clamp.
+    // Bands covering only the middle columns: left/right measures clamp.
     std::vector<RpcAffineBanded::Band> middle;
     for (int i = 0; i < 6; ++i) {
         middle.push_back(RpcAffineBanded::Band{
-            10000.0 + 5000.0 * i, 15000.0 + 5000.0 * i, 0.0, 0.0});
+            35000.0 + 5000.0 * i, 40000.0 + 5000.0 * i, 0.0, 0.0});
     }
     std::vector<RpcAffineBanded> net;
     for (int s = 0; s < 3; ++s) {
@@ -987,16 +1048,16 @@ TEST(RpcAffineBanded, BlendingSemantics) {
         RpcAffine::Identity(), shuffled, RpcAffineBandBasis::Constant);
     ASSERT_TRUE(constant.has_value());
     EXPECT_EQ(constant->num_bands(), 3);
-    const auto ConstantShift = [&](double row, double dx, double dy) {
+    const auto ConstantShift = [&](double col, double dx, double dy) {
         double gx = 99.0;
         double gy = 99.0;
-        constant->ShiftAt(row, gx, gy);
-        EXPECT_NEAR(gx, dx, 1e-12) << "row " << row;
-        EXPECT_NEAR(gy, dy, 1e-12) << "row " << row;
+        constant->ShiftAt(col, gx, gy);
+        EXPECT_NEAR(gx, dx, 1e-12) << "col " << col;
+        EXPECT_NEAR(gy, dy, 1e-12) << "col " << col;
     };
     ConstantShift(0.0, 1.0, -1.0);
     ConstantShift(9.9, 1.0, -1.0);
-    ConstantShift(10.0, 3.0, 1.0);  // [row_lo, row_hi) containment
+    ConstantShift(10.0, 3.0, 1.0);  // [col_lo, col_hi) containment
     ConstantShift(15.0, 3.0, 1.0);
     ConstantShift(25.0, -2.0, 2.0);
     ConstantShift(-7.0, 1.0, -1.0);  // outside: nearest center is 5
@@ -1005,12 +1066,12 @@ TEST(RpcAffineBanded, BlendingSemantics) {
     const auto linear = RpcAffineBanded::Make(
         RpcAffine::Identity(), shuffled, RpcAffineBandBasis::Linear);
     ASSERT_TRUE(linear.has_value());
-    const auto LinearShift = [&](double row, double dx, double dy) {
+    const auto LinearShift = [&](double col, double dx, double dy) {
         double gx = 99.0;
         double gy = 99.0;
-        linear->ShiftAt(row, gx, gy);
-        EXPECT_NEAR(gx, dx, 1e-12) << "row " << row;
-        EXPECT_NEAR(gy, dy, 1e-12) << "row " << row;
+        linear->ShiftAt(col, gx, gy);
+        EXPECT_NEAR(gx, dx, 1e-12) << "col " << col;
+        EXPECT_NEAR(gy, dy, 1e-12) << "col " << col;
     };
     // Centers at 5 / 15 / 25: tent interpolation, constant extension.
     LinearShift(5.0, 1.0, -1.0);
@@ -1059,12 +1120,12 @@ TEST(RpcAffineBanded, BlendingSemantics) {
 
     // MakeUniform: the fresh-solve starting point.
     const auto uniform = RpcAffineBanded::MakeUniform(
-        RpcAffine::Identity(), 0.0, kRowSpan, 12, RpcAffineBandBasis::Linear);
+        RpcAffine::Identity(), kColLo, kColHi, 12, RpcAffineBandBasis::Linear);
     ASSERT_TRUE(uniform.has_value());
     EXPECT_EQ(uniform->num_bands(), 12);
-    EXPECT_NEAR(uniform->band(0).row_lo, 0.0, 1e-9);
-    EXPECT_NEAR(uniform->band(11).row_hi, kRowSpan, 1e-9);
-    uniform->ShiftAt(25000.0, dx, dy);
+    EXPECT_NEAR(uniform->band(0).col_lo, kColLo, 1e-9);
+    EXPECT_NEAR(uniform->band(11).col_hi, kColHi, 1e-9);
+    uniform->ShiftAt(50000.0, dx, dy);
     EXPECT_EQ(dx, 0.0);
     EXPECT_EQ(dy, 0.0);
     EXPECT_FALSE(
@@ -1073,7 +1134,7 @@ TEST(RpcAffineBanded, BlendingSemantics) {
             .has_value());
 
     // The storage cap: kMaxBands accepted, one more rejected; a reversed
-    // row range is rejected.
+    // col range is rejected.
     const std::vector<Band> max_bands(
         static_cast<std::size_t>(RpcAffineBanded::kMaxBands),
         Band{0.0, 1.0, 0.0, 0.0});
@@ -1110,13 +1171,14 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
     // harmonics), distinct per scene.
     std::vector<RpcAffineBanded> truth_banded;
     for (int s = 0; s < 3; ++s) {
+        const double span = kColHi - kColLo;
         std::vector<RpcAffineBanded::Band> bs;
         for (int i = 0; i < kBandsPerScene; ++i) {
             bs.push_back(RpcAffineBanded::Band{
-                kRowSpan * static_cast<double>(i) /
-                    static_cast<double>(kBandsPerScene),
-                kRowSpan * static_cast<double>(i + 1) /
-                    static_cast<double>(kBandsPerScene),
+                kColLo + span * static_cast<double>(i) /
+                             static_cast<double>(kBandsPerScene),
+                kColLo + span * static_cast<double>(i + 1) /
+                             static_cast<double>(kBandsPerScene),
                 3.0 * std::sin((kTwoPi * i / kBandsPerScene) + s),
                 2.0 * std::cos((kTwoPi * i / kBandsPerScene) - s)});
         }
@@ -1127,7 +1189,7 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
     }
 
     // Corrupt the pixels through the truth composites (noiseless). GCPs
-    // at row strides anchor the per-row-region common modes -- without
+    // at col strides anchor the per-col-region common modes -- without
     // them the composites drift by a smooth common pattern that the free
     // ground blocks absorb (the documented observability caveat), and the
     // composite-vs-truth comparison below would be meaningless.
@@ -1150,8 +1212,7 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
         }
         points.push_back(pt);
     }
-    for (int k = 0; k < 8; ++k) {
-        const std::size_t idx = (static_cast<std::size_t>(k) * pts.size()) / 8;
+    for (std::size_t idx : ColStridedIndices(views, pts, 8)) {
         RpcBaPoint gcp = points[idx];
         gcp.ground_fixed = true;
         gcp.lon = pts[idx].lon;
@@ -1167,7 +1228,7 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
 
     ASSERT_TRUE(report.ok) << report.message;
     // The truth lies inside the model family: the fit is exact (the small
-    // residue is the row-argument offset between corruption and solve).
+    // residue is the col-argument offset between corruption and solve).
     EXPECT_LT(report.rms_after_px, 0.05);
 
     for (int s = 0; s < 3; ++s) {
@@ -1178,11 +1239,11 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
         // against per-point ground gradients, so the constant-extension
         // zones are only data-anchored (a documented property of the tent
         // basis, not a solver defect).
-        const double row_lo = 0.5 * got.band(0).row_hi;
-        const double row_hi = 0.5 * (got.band(kBandsPerScene - 1).row_lo +
-                                     got.band(kBandsPerScene - 1).row_hi);
-        for (double row = row_lo + 1.0; row < row_hi; row += 733.0) {
-            for (double col = 3.0; col < 100000.0; col += 6151.0) {
+        const double col_lo = 0.5 * got.band(0).col_hi;
+        const double col_hi = 0.5 * (got.band(kBandsPerScene - 1).col_lo +
+                                     got.band(kBandsPerScene - 1).col_hi);
+        for (double col = col_lo + 1.0; col < col_hi; col += 733.0) {
+            for (double row = 3.0; row < 100000.0; row += 6151.0) {
                 double want_c = 0.0;
                 double want_r = 0.0;
                 double got_c = 0.0;
@@ -1191,9 +1252,9 @@ TEST(SolveRpcBundleAdjustBanded, ConsumerReproducesSolve) {
                     col, row, want_c, want_r);
                 got.Apply(col, row, got_c, got_r);
                 EXPECT_NEAR(got_c, want_c, 0.05)
-                    << "scene " << s << " row " << row;
+                    << "scene " << s << " col " << col;
                 EXPECT_NEAR(got_r, want_r, 0.05)
-                    << "scene " << s << " row " << row;
+                    << "scene " << s << " col " << col;
             }
         }
     }

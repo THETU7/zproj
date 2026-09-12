@@ -1,13 +1,14 @@
-// Banded bundle adjustment demo (Ceres): the wave-absorbing camera model --
-// one global affine per scene plus per-band translation shifts (tent
-// basis) -- against the wavy systematic error pattern (error large at the
-// scene's top, middle and bottom, small at the quarter rows).
+// Banded bundle adjustment demo (Ceres): the cross-track-error camera
+// model -- one global affine per scene plus per-band translation shifts
+// banded along the pixel COLUMN axis (tent basis) -- against a
+// column-dependent systematic error pattern (error large at the scene's
+// left, middle and right, small at the quarter columns).
 //
-// A known per-scene affine AND a single-period row wave are baked into
+// A known per-scene affine AND a single-period column wave are baked into
 // three synthetic views' projections of a set of ground points (plus
 // Gaussian pixel noise, outliers, and GCPs anchoring the absolute datum).
 // solve_rpc_bundle_adjust_banded() recovers both: the scene affines land
-// on the truth, the band shifts track the wave, and the residual-vs-row
+// on the truth, the band shifts track the wave, and the residual-vs-col
 // profile flattens from its W shape to the noise floor.
 //
 // Usage:
@@ -50,7 +51,10 @@ using zproj::crs::solve_rpc_bundle_adjust_banded;
 using zproj::crs::to_ecef;
 using zproj::crs::triangulate_nview;
 
-constexpr double kRowSpan = 50000.0;  // the synthetic scenes' row range
+// The synthetic scenes' col span: cols land in [25000, 75000]
+// (samp_off -/+ 0.5*samp_scale, the points' lon window).
+constexpr double kColLo = 25000.0;
+constexpr double kColHi = 75000.0;
 
 // The demo views (same family as the rpc_bundle_adjust example): nadir
 // base plus per-view height coupling and nonlinearity.
@@ -98,11 +102,11 @@ RpcAffine MakeTruthAffine(int view) {
     return a;
 }
 
-// One full-period row wave (the observed pattern: max at top/middle/
-// bottom, zero at the quarter rows).
-double RowWave(double row, double amp) {
+// One full-period column wave (the observed pattern: max at left/middle/
+// right, zero at the quarter columns). Evaluated at the RAW RPC col.
+double ColWave(double col, double amp) {
     constexpr double kTwoPi = 6.2831853071795865;
-    return amp * std::cos(kTwoPi * row / kRowSpan);
+    return amp * std::cos(kTwoPi * (col - kColLo) / (kColHi - kColLo));
 }
 
 struct Pt {
@@ -149,10 +153,10 @@ int main(int argc, char** argv) {
         truth.push_back(MakeTruthAffine(v));
     }
 
-    // Corrupted control network: per-scene truth affine + the row wave +
-    // noise + outliers. GCPs are picked from the tie points spread
-    // UNIFORMLY across the rows: every band region needs its absolute
-    // anchor (a row region without a GCP carries an unobservable common
+    // Corrupted control network: per-scene truth affine + the column wave
+    // + noise + outliers. GCPs are picked from the tie points spread
+    // UNIFORMLY across the columns: every band region needs its absolute
+    // anchor (a col region without a GCP carries an unobservable common
     // mode, see rpc_bundle_adjust.hpp).
     const std::vector<Pt> pts = MakePoints(num_points, scenes[0]);
     std::mt19937 rng(7);
@@ -173,9 +177,11 @@ int main(int argc, char** argv) {
                               pts[i].alt,
                               c,
                               r);
+            const double wave_c = ColWave(c, kColAmp);
+            const double wave_r = ColWave(c, kRowAmp);
             truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
-            c += RowWave(r, kColAmp) + noise(rng);
-            r += RowWave(r, kRowAmp) + noise(rng);
+            c += wave_c + noise(rng);
+            r += wave_r + noise(rng);
             if (outlier && v == 0) {
                 c += 25.0;
             }
@@ -191,8 +197,8 @@ int main(int argc, char** argv) {
         }
         std::sort(
             order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-                return points[a].measures.front().row <
-                       points[b].measures.front().row;
+                return points[a].measures.front().col <
+                       points[b].measures.front().col;
             });
         for (std::size_t k = 0; k < kNumGcps; ++k) {
             const std::size_t idx = order[(k * num_points) / kNumGcps];
@@ -207,7 +213,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "banded bundle adjustment: " << kNumScenes << " scenes x "
-              << kBandsPerScene << " tent bands, " << num_points
+              << kBandsPerScene << " tent bands (col axis), " << num_points
               << " tie points + " << kNumGcps << " GCPs, " << total_measures
               << " measures\nwave: one period per scene, amplitudes " << kColAmp
               << "/" << kRowAmp << " px, sigma " << kSigma
@@ -220,8 +226,8 @@ int main(int argc, char** argv) {
     corrected.reserve(static_cast<std::size_t>(kNumScenes));
     for (int s = 0; s < kNumScenes; ++s) {
         auto scene = RpcAffineBanded::MakeUniform(RpcAffine::Identity(),
-                                                  0.0,
-                                                  kRowSpan,
+                                                  kColLo,
+                                                  kColHi,
                                                   kBandsPerScene,
                                                   RpcAffineBandBasis::Linear);
         if (!scene) {
@@ -234,7 +240,7 @@ int main(int argc, char** argv) {
     RpcBaBandedOptions options;
     options.pixel_sigma = kSigma;
     options.robust_threshold_px = 3.0 * kSigma;
-    // Row regions without a GCP carry their own common mode (all scenes'
+    // Col regions without a GCP carry their own common mode (all scenes'
     // bands there drift together, absorbed by the ground blocks); the
     // shift prior pins those regions to "no correction relative to the
     // scene affine" (see rpc_bundle_adjust.hpp's observability note).
@@ -254,11 +260,12 @@ int main(int argc, char** argv) {
               << "reprojection RMS: " << report.rms_before_px << " px -> "
               << report.rms_after_px << " px\n\n";
 
-    // Residual RMS by row tenth, raw vs corrected: the W shape must
+    // Residual RMS by col tenth, raw vs corrected: the W shape must
     // flatten. (Clean points only; outlier-corrupted measures stay bad by
     // design -- the robust loss keeps them from biasing the SOLVE.)
     {
         constexpr int kBuckets = 10;
+        const double col_step = (kColHi - kColLo) / kBuckets;
         std::vector<std::array<double, 2>> buck_sum(kBuckets, {0.0, 0.0});
         std::vector<std::array<int, 2>> buck_cnt(kBuckets, {0, 0});
         for (std::size_t i = 0; i < num_points; ++i) {
@@ -276,10 +283,10 @@ int main(int argc, char** argv) {
                                   r);
                 const int bucket =
                     std::min(kBuckets - 1,
-                             static_cast<int>(m.row / (kRowSpan / kBuckets)));
+                             static_cast<int>((m.col - kColLo) / col_step));
                 const RpcAffine eff =
                     corrected[static_cast<std::size_t>(m.view)].EffectiveAffine(
-                        m.row);
+                        m.col);
                 const double raw_c = c - m.col;
                 const double raw_r = r - m.row;
                 const double cor_c =
@@ -294,15 +301,17 @@ int main(int argc, char** argv) {
                 n[1] += 2;
             }
         }
-        std::cout << "residual rms by row tenth [px]   (raw -> corrected)\n";
+        std::cout << "residual rms by col tenth [px]   (raw -> corrected)\n";
         for (int b = 0; b < kBuckets; ++b) {
             const auto& s = buck_sum[static_cast<std::size_t>(b)];
             const auto& n = buck_cnt[static_cast<std::size_t>(b)];
-            std::cout << "  rows " << std::setw(5) << b * 5000 << "-"
-                      << std::setw(5) << (b + 1) * 5000 << ":  " << std::setw(7)
-                      << std::setprecision(2) << std::sqrt(s[0] / n[0])
-                      << " -> " << std::setw(7) << std::sqrt(s[1] / n[1])
-                      << "\n";
+            std::cout << "  cols " << std::setw(5)
+                      << static_cast<int>(kColLo + b * col_step) << "-"
+                      << std::setw(5)
+                      << static_cast<int>(kColLo + (b + 1) * col_step) << ":  "
+                      << std::setw(7) << std::setprecision(2)
+                      << std::sqrt(s[0] / n[0]) << " -> " << std::setw(7)
+                      << std::sqrt(s[1] / n[1]) << "\n";
         }
     }
 
@@ -328,7 +337,7 @@ int main(int argc, char** argv) {
                                   r);
                 const RpcAffine eff =
                     corrected[static_cast<std::size_t>(m.view)].EffectiveAffine(
-                        m.row);
+                        m.col);
                 worst = std::max(
                     worst,
                     std::fabs((eff.p[0] + (eff.p[1] * c) + (eff.p[2] * r)) -
@@ -363,7 +372,7 @@ int main(int argc, char** argv) {
                 const double span = std::min(0.9 * v.height_scale, 50.0);
                 const RpcAffine eff =
                     which == 1 ? corrected[static_cast<std::size_t>(m.view)]
-                                     .EffectiveAffine(m.row)
+                                     .EffectiveAffine(m.col)
                                : RpcAffine::Identity();
                 RpcRay ray;
                 if (zproj::crs::rpc_ray_affine(

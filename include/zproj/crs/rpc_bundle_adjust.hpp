@@ -157,12 +157,14 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 // ========================= banded variant =================================
 //
 // solve_rpc_bundle_adjust_banded(): one GLOBAL affine per scene plus a
-// per-band TRANSLATION shift -- the camera model for row-dependent
-// systematic error (the wave/jitter pattern: error large at the scene's
-// top, middle and bottom, small at the quarter rows). The scene affine
-// absorbs the scene-wide scale/shear/rotation bias (constrained by ALL of
-// the scene's observations); the band shifts absorb the wave as a
-// piecewise-constant or piecewise-linear function of the pixel row:
+// per-band TRANSLATION shift, banded along the pixel COLUMN axis -- the
+// camera model for cross-track systematic error (error that varies across
+// the detector array: CCD-segment stitching offsets, array-internal
+// distortion; in image terms, columns disagree while the along-track row
+// direction -- the time axis -- stays clean, and a per-scene affine has
+// already absorbed the constant and col-LINEAR parts). The band shifts
+// absorb the remaining col structure as a piecewise-constant or
+// piecewise-linear function of the pixel col:
 //
 //     col' = (e0 + dx_band) + e1*col + e2*row
 //     row' = (f0 + dy_band) + f1*col + f2*row
@@ -178,27 +180,26 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
 //
 // Parameterization internals (exact, no soft constraints):
 //   * The band shifts are ZERO-MEAN within each scene: each scene's
-//     highest-center band derives its shift from the others. This removes
-//     the exact degeneracy between the scene affine's translation and the
-//     mean of its band shifts, and means the effective per-band
-//     translation is scene translation + zero-mean wave. A scene with a
-//     single band has its shift pinned to zero (no wave structure to
-//     resolve).
+//     highest-center (rightmost) band derives its shift from the others. This
+//     removes the exact degeneracy between the scene affine's translation and
+//     the mean of its band shifts, and means the effective per-band translation
+//     is scene translation + zero-mean wave. A scene with a single band has its
+//     shift pinned to zero (no wave structure to resolve).
 //   * zero_mean_affines, when set, generalizes to "the MEAN of the scene
 //     affines is the identity" (the last scene's affine is derived from the
 //     others; the caller's initial affine for it is overruled).
 //
 // Observability caveat (stronger than the plain solver's): with matches
-// only, every row region carries its own horizontal common mode -- the
-// bands covering those rows in ALL scenes can drift together, the ground
-// blocks absorb it, and zero-mean does not touch it. Anchor with GCPs
-// spread across the rows, or with band_shift_prior_weight (a Tikhonov
-// prior that pins the drift to "no correction relative to the scene
-// affine"); per-point DEM heights pin the height direction as usual.
+// only, every col region carries its own horizontal common mode -- the
+// bands covering those columns in ALL scenes can drift together, the
+// ground blocks absorb it, and zero-mean does not touch it. Anchor with
+// GCPs spread across the columns, or with band_shift_prior_weight (a
+// Tikhonov prior that pins the drift to "no correction relative to the
+// scene affine"); per-point DEM heights pin the height direction as usual.
 //
 // Measures reference SCENES (RpcBaMeasure::view indexes `scenes`, not
-// bands): a measure's band follows from its pixel row, so ordinary
-// multi-scene match networks plug in unchanged. Rows outside a scene's
+// bands): a measure's band follows from its pixel col, so ordinary
+// multi-scene match networks plug in unchanged. Columns outside a scene's
 // band range clamp to the nearest band (constant extension under
 // RpcAffineBandBasis::Linear).
 //

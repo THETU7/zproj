@@ -175,8 +175,9 @@ struct SceneParams {
     std::array<double, 6> aff;  // the scene affine block
     RpcAffineBandBasis basis = RpcAffineBandBasis::Linear;
     std::vector<std::array<double, 2>> shift;  // [i]: local band i's block
-    std::vector<std::array<double, 2>> range;  // [i]: (row_lo, row_hi)
-    std::vector<double> center;                // [i]: band center, ascending
+    std::vector<std::array<double, 2>> range;  // [i]: (col_lo, col_hi)
+    std::vector<double> center;                // [i]: band col center,
+                                               //      ascending
 };
 
 }  // namespace
@@ -212,21 +213,21 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         for (int i = 0; i < obj.num_bands(); ++i) {
             sp.shift[static_cast<std::size_t>(i)] = {obj.band(i).dx,
                                                      obj.band(i).dy};
-            sp.range[static_cast<std::size_t>(i)] = {obj.band(i).row_lo,
-                                                     obj.band(i).row_hi};
+            sp.range[static_cast<std::size_t>(i)] = {obj.band(i).col_lo,
+                                                     obj.band(i).col_hi};
             sp.center[static_cast<std::size_t>(i)] =
-                0.5 * (obj.band(i).row_lo + obj.band(i).row_hi);
+                0.5 * (obj.band(i).col_lo + obj.band(i).col_hi);
         }
     }
     const bool zero_mean = options.zero_mean_affines;
     const int derived_scene = zero_mean ? num_scenes - 1 : -1;
 
     // ---- Measure -> band terms, and the per-measure layout ----------------
-    // (local band index, weight) pairs for one measure row; Constant basis
+    // (local band index, weight) pairs for one measure col; Constant basis
     // picks the containing (else nearest) band, Linear blends the two
     // bracketing band centers with constant extension outside them. A
     // scene without bands contributes no terms (plain affine scene).
-    const auto BandTerms = [&](int scene, double row) {
+    const auto BandTerms = [&](int scene, double col) {
         std::vector<std::pair<int, double>> terms;
         const SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
         const int count = static_cast<int>(sp.shift.size());
@@ -237,18 +238,18 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             int pick = 0;
             for (int i = 0; i < count; ++i) {
                 const auto& r = sp.range[static_cast<std::size_t>(i)];
-                if (row >= r[0] && row < r[1]) {
+                if (col >= r[0] && col < r[1]) {
                     pick = i;
                     break;
                 }
             }
             const auto& r = sp.range[static_cast<std::size_t>(pick)];
-            if (!(row >= r[0] && row < r[1])) {
+            if (!(col >= r[0] && col < r[1])) {
                 // Outside every band: nearest center.
                 double best = std::numeric_limits<double>::infinity();
                 for (int i = 0; i < count; ++i) {
                     const double d =
-                        std::fabs(sp.center[static_cast<std::size_t>(i)] - row);
+                        std::fabs(sp.center[static_cast<std::size_t>(i)] - col);
                     if (d < best) {
                         best = d;
                         pick = i;
@@ -258,9 +259,9 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             terms.emplace_back(pick, 1.0);
             return terms;
         }
-        // Linear (tent) basis: bracket the row by band centers.
+        // Linear (tent) basis: bracket the col by band centers.
         int j = 0;
-        while (j < count && sp.center[static_cast<std::size_t>(j)] < row) {
+        while (j < count && sp.center[static_cast<std::size_t>(j)] < col) {
             ++j;
         }
         if (j == 0 || j == count) {
@@ -276,13 +277,13 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
             return terms;
         }
         const double w_i =
-            (sp.center[static_cast<std::size_t>(j)] - row) / span;
+            (sp.center[static_cast<std::size_t>(j)] - col) / span;
         terms.emplace_back(i, w_i);
         terms.emplace_back(j, 1.0 - w_i);
         return terms;
     };
 
-    const auto MakeLayout = [&](int scene, double row) {
+    const auto MakeLayout = [&](int scene, double col) {
         MeasureLayout lay;
         if (scene != derived_scene) {
             lay.aff_terms.emplace_back(
@@ -305,7 +306,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         // accumulate per block so tent brackets never repeat a pointer.
         SceneParams& sp = scene_params[static_cast<std::size_t>(scene)];
         const int count = static_cast<int>(sp.shift.size());
-        for (const auto& [band, weight] : BandTerms(scene, row)) {
+        for (const auto& [band, weight] : BandTerms(scene, col)) {
             if (band + 1 < count) {
                 double* src = sp.shift[static_cast<std::size_t>(band)].data();
                 const auto it = std::find_if(
@@ -340,7 +341,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
     };
 
     // ---- Sanitize the control network -------------------------------------
-    // Measures reference scenes; a non-finite row cannot be banded.
+    // Measures reference scenes; a non-finite col cannot be banded.
     std::vector<RpcBaPoint> ties;
     std::vector<RpcBaPoint> gcps;
     int skipped = 0;
@@ -355,7 +356,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         clean.measures.clear();
         bool bad = false;
         for (const RpcBaMeasure& m : pt.measures) {
-            if (m.view < 0 || m.view >= num_scenes || !std::isfinite(m.row)) {
+            if (m.view < 0 || m.view >= num_scenes || !std::isfinite(m.col)) {
                 bad = true;
                 break;
             }
@@ -397,7 +398,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
         for (const RpcBaMeasure& m : pt.measures) {
             const RpcInfo& v = scenes[static_cast<std::size_t>(m.view)];
             const double span = std::min(0.9 * v.height_scale, 50.0);
-            const RpcAffine eff = EvalEffective(MakeLayout(m.view, m.row));
+            const RpcAffine eff = EvalEffective(MakeLayout(m.view, m.col));
             RpcRay ray;
             if (rpc_ray_affine(
                     v,
@@ -518,7 +519,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
 
     const auto AddMeasures = [&](const RpcBaPoint& pt, double* ground_block) {
         for (const RpcBaMeasure& m : pt.measures) {
-            MeasureLayout lay = MakeLayout(m.view, m.row);
+            MeasureLayout lay = MakeLayout(m.view, m.col);
             std::vector<double*> blocks;
             blocks.reserve(lay.aff_terms.size() + lay.shift_terms.size() + 1);
             for (const auto& term : lay.aff_terms) {
@@ -607,7 +608,7 @@ RpcBaReport solve_rpc_bundle_adjust_banded(
                                    const std::array<double, 3>& g) {
                 for (const RpcBaMeasure& m : pt.measures) {
                     const RpcAffine eff =
-                        EvalEffective(MakeLayout(m.view, m.row));
+                        EvalEffective(MakeLayout(m.view, m.col));
                     sum += ResidualSq(scenes[static_cast<std::size_t>(m.view)],
                                       eff.p.data(),
                                       g.data(),

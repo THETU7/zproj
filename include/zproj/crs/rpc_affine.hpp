@@ -111,84 +111,87 @@ struct RpcAffine {
     }
 };
 
-// How a banded affine blends its band shifts across rows (the correction
-// basis shared by the banded solver and RpcAffineBanded below).
+// How a banded affine blends its band shifts across columns (the
+// correction basis shared by the banded solver and RpcAffineBanded below).
 enum class RpcAffineBandBasis {
-    // One-hot: the band whose [row_lo, row_hi) contains the row takes the
+    // One-hot: the band whose [col_lo, col_hi) contains the col takes the
     // full shift (nearest band outside the covered range). Piecewise-
-    // constant correction; jumps at band boundaries.
+    // constant correction; jumps at band boundaries. The shape of
+    // detector-array stitching errors (CCD segment offsets).
     Constant,
     // Tent: linear interpolation between the two nearest band centers
     // (constant extension outside them). Piecewise-LINEAR, C0-continuous
-    // -- no seams. The usual choice for smooth row-dependent error.
+    // -- no seams. The usual choice for smooth col-dependent error.
     Linear,
 };
 
 // The consumer-side composite correction of solve_rpc_bundle_adjust_banded
 // (rpc_bundle_adjust.hpp): one RpcAffine plus per-band translation shifts,
-// ready to apply to pixels -- downstream code consumes THIS instead of
-// juggling the scene affine, the band table and the shift table and
-// re-implementing the blending.
+// banded along the pixel COLUMN axis (the cross-track detector-array error
+// model -- see the banded-variant notes there), ready to apply to pixels
+// -- downstream code consumes THIS instead of juggling the scene affine,
+// the band table and the shift table and re-implementing the blending.
 //
-//     col' = (e0 + dx_band(row)) + e1*col + e2*row
-//     row' = (f0 + dy_band(row)) + f1*col + f2*row
+//     col' = (e0 + dx_band(col)) + e1*col + e2*row
+//     row' = (f0 + dy_band(col)) + f1*col + f2*row
 //
 // Fixed-size storage (kMaxBands, the same cap convention as the CUDA
 // N-view kernels) keeps the struct a plain-data value that device kernels
-// can take by value, like RpcAffine. Bands are stored sorted by row
+// can take by value, like RpcAffine. Bands are stored sorted by column
 // center at Make() time (host); the blending methods are host/device
 // shared arithmetic. Compose with the existing machinery through
 // EffectiveAffine:
 //
 //     corrected pixel:            baff.Apply(col, row, c2, r2);
 //     forward through correction: rpc_forward_point_affine(
-//                                     info, baff.EffectiveAffine(row), ...);
+//                                     info, baff.EffectiveAffine(col), ...);
 //     back-projection / rays:     rpc_ray_affine(
-//                                     info, init, baff.EffectiveAffine(row),
+//                                     info, init, baff.EffectiveAffine(col),
 //                                     col, row, h_lo, h_hi, ray);
 //
-// The EffectiveAffine row for BACK-projection is the observed pixel's row:
-// the shift varies slowly with row, so the slope-times-shift error of
-// un-applying at the observed row rather than the exact pre-correction row
+// The EffectiveAffine col for BACK-projection is the observed pixel's col:
+// the shift varies slowly with col, so the slope-times-shift error of
+// un-applying at the observed col rather than the exact pre-correction col
 // is milli-pixel scale.
 //
 // Uniqueness note: on the band-center span the composite correction is
 // uniquely determined by the solve, but in the constant-extension zones
 // beyond the outermost centers an affine tilt trades against per-point
 // ground gradients -- there the composite is only as good as the local
-// data anchor. Keep the outer band centers near the scene's row edges
+// data anchor. Keep the outer band centers near the scene's col edges
 // (uniform tiling already does: the extension zones are half a band wide).
 class RpcAffineBanded {
 public:
-    // One band's correction: rows [row_lo, row_hi) shift by (dx, dy) px.
+    // One band's correction: columns [col_lo, col_hi) shift by (dx, dy) px.
     struct Band {
-        double row_lo = 0.0;
-        double row_hi = 0.0;
+        double col_lo = 0.0;
+        double col_hi = 0.0;
         double dx = 0.0;
         double dy = 0.0;
     };
 
     // Storage cap (bands per scene); raise if a scene ever needs finer
-    // banding. 32 uniform bands over a 50000-line scene is ~1560 lines per
-    // band -- far finer than any practical wave.
+    // banding. 32 uniform bands over a 100000-sample scene is ~3100
+    // samples per band -- far finer than any practical cross-track
+    // structure.
     static constexpr int kMaxBands = 32;
 
     // Identity affine with no bands.
     RpcAffineBanded() = default;
 
-    // Host-side assembly: takes the bands in any order (sorted by row
+    // Host-side assembly: takes the bands in any order (sorted by column
     // center internally), validates the count against kMaxBands and each
-    // band's row range. Nullopt on violation.
+    // band's col range. Nullopt on violation.
     static std::optional<RpcAffineBanded> Make(const RpcAffine& affine,
                                                std::vector<Band> bands,
                                                RpcAffineBandBasis basis);
 
     // Uniform convenience: `num_bands` equal-width zero-shift bands tiling
-    // [row_lo, row_hi) around `affine` -- the fresh-solve starting point
+    // [col_lo, col_hi) around `affine` -- the fresh-solve starting point
     // for solve_rpc_bundle_adjust_banded. Nullopt on the same violations.
     static std::optional<RpcAffineBanded> MakeUniform(const RpcAffine& affine,
-                                                      double row_lo,
-                                                      double row_hi,
+                                                      double col_lo,
+                                                      double col_hi,
                                                       int num_bands,
                                                       RpcAffineBandBasis basis);
 
@@ -209,11 +212,11 @@ public:
         b.dy = dy;
     }
 
-    // The blended shift at one row, per the basis: the containing (else
+    // The blended shift at one col, per the basis: the containing (else
     // nearest) band under Constant, the tent interpolation between the two
     // bracketing centers (constant extension outside them) under Linear.
     // Zero when there are no bands.
-    ZT_HOST_DEVICE void ShiftAt(double row, double& dx, double& dy) const {
+    ZT_HOST_DEVICE void ShiftAt(double col, double& dx, double& dy) const {
         dx = 0.0;
         dy = 0.0;
         if (num_bands_ == 0) {
@@ -223,7 +226,7 @@ public:
             int pick = -1;
             for (int i = 0; i < num_bands_; ++i) {
                 const Band& b = bands_[static_cast<std::size_t>(i)];
-                if (row >= b.row_lo && row < b.row_hi) {
+                if (col >= b.col_lo && col < b.col_hi) {
                     pick = i;
                     break;
                 }
@@ -232,7 +235,7 @@ public:
                 // Outside every band: nearest center.
                 double best = HUGE_VAL;
                 for (int i = 0; i < num_bands_; ++i) {
-                    const double d = fabs(Center(i) - row);
+                    const double d = fabs(Center(i) - col);
                     if (d < best) {
                         best = d;
                         pick = i;
@@ -245,7 +248,7 @@ public:
         }
         // Linear (tent) basis over the center-sorted bands.
         int j = 0;
-        while (j < num_bands_ && Center(j) < row) {
+        while (j < num_bands_ && Center(j) < col) {
             ++j;
         }
         if (j == 0 || j == num_bands_) {
@@ -264,20 +267,20 @@ public:
             dy = b.dy;
             return;
         }
-        const double w = (Center(j) - row) / span;
+        const double w = (Center(j) - col) / span;
         const Band& lo = bands_[static_cast<std::size_t>(i)];
         const Band& hi = bands_[static_cast<std::size_t>(j)];
         dx = (w * lo.dx) + ((1.0 - w) * hi.dx);
         dy = (w * lo.dy) + ((1.0 - w) * hi.dy);
     }
 
-    // The affine with the shift at `row` folded into the translations --
+    // The affine with the shift at `col` folded into the translations --
     // the composition point with rpc_forward_point_affine / rpc_ray_affine.
-    ZT_HOST_DEVICE RpcAffine EffectiveAffine(double row) const {
+    ZT_HOST_DEVICE RpcAffine EffectiveAffine(double col) const {
         RpcAffine eff = affine_;
         double dx = 0.0;
         double dy = 0.0;
-        ShiftAt(row, dx, dy);
+        ShiftAt(col, dx, dy);
         eff.p[0] += dx;
         eff.p[3] += dy;
         return eff;
@@ -291,7 +294,7 @@ public:
         affine_.Apply(col, row, out_col, out_row);
         double dx = 0.0;
         double dy = 0.0;
-        ShiftAt(row, dx, dy);
+        ShiftAt(col, dx, dy);
         out_col += dx;
         out_row += dy;
     }
@@ -299,7 +302,7 @@ public:
 private:
     ZT_HOST_DEVICE double Center(int i) const {
         const Band& b = bands_[static_cast<std::size_t>(i)];
-        return 0.5 * (b.row_lo + b.row_hi);
+        return 0.5 * (b.col_lo + b.col_hi);
     }
 
     RpcAffine affine_;
@@ -316,12 +319,12 @@ inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
         return std::nullopt;
     }
     for (const Band& b : bands) {
-        if (!(b.row_lo < b.row_hi)) {
+        if (!(b.col_lo < b.col_hi)) {
             return std::nullopt;
         }
     }
     std::sort(bands.begin(), bands.end(), [](const Band& a, const Band& b) {
-        return (a.row_lo + a.row_hi) < (b.row_lo + b.row_hi);
+        return (a.col_lo + a.col_hi) < (b.col_lo + b.col_hi);
     });
     RpcAffineBanded out;
     out.affine_ = affine;
@@ -335,18 +338,18 @@ inline std::optional<RpcAffineBanded> RpcAffineBanded::Make(
 
 inline std::optional<RpcAffineBanded> RpcAffineBanded::MakeUniform(
     const RpcAffine& affine,
-    double row_lo,
-    double row_hi,
+    double col_lo,
+    double col_hi,
     int num_bands,
     RpcAffineBandBasis basis) {
-    if (num_bands < 0 || num_bands > kMaxBands || !(row_lo < row_hi)) {
+    if (num_bands < 0 || num_bands > kMaxBands || !(col_lo < col_hi)) {
         return std::nullopt;
     }
     std::vector<Band> bands(static_cast<std::size_t>(num_bands));
     for (int i = 0; i < num_bands; ++i) {
-        const double lo = row_lo + (row_hi - row_lo) * static_cast<double>(i) /
+        const double lo = col_lo + (col_hi - col_lo) * static_cast<double>(i) /
                                        static_cast<double>(num_bands);
-        const double hi = row_lo + (row_hi - row_lo) *
+        const double hi = col_lo + (col_hi - col_lo) *
                                        static_cast<double>(i + 1) /
                                        static_cast<double>(num_bands);
         bands[static_cast<std::size_t>(i)] = Band{lo, hi, 0.0, 0.0};
