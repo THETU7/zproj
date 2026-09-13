@@ -2028,6 +2028,233 @@ TEST(SolveRpcBundleAdjustGridded, SmoothnessPriorSuppressesSpikes) {
     EXPECT_LT(spike_smooth, 3.0);
 }
 
+// ================== virtual control points ================================
+
+// A full-period wave over the COVERED half only: the covered bands' fitted
+// shifts sum to ~0 exactly (cos at the half-offset sample points of a
+// full period sums to zero), so the per-scene zero-mean derivation stays
+// out of the way and the virtual points' effect on the starved bands is
+// isolatable.
+double LeftWave(double col, double amp) {
+    constexpr double kTwoPi = 6.2831853071795865;
+    const double span = 0.5 * (kColHi - kColLo);
+    return amp * std::cos(kTwoPi * (col - kColLo) / span);
+}
+
+// Virtual control points pin the match-free regions: with data covering
+// only the left 45% of the span and every cell warm-started at (5, -4),
+// the starved bands keep the stale seed bit for bit WITHOUT the
+// pseudo-observations (nothing observes them) and return to ~0 WITH them
+// (each starved band's own virtual points dominate its normal equation),
+// while the covered bands keep fitting the wave. Identity scene affines
+// (fix_scene_affines at identity) keep the parameterization consistent
+// with "composite correction ~ 0": with a NON-identity frozen affine the
+// pinning cancels the affine through the cells, which fights the
+// per-scene zero-mean sum -- the documented reason the prior wants a
+// free or near-identity affine (the two-stage satellite regime).
+TEST(SolveRpcBundleAdjustGridded, VirtualControlPinsUncoveredRegions) {
+    const std::vector<RpcInfo> views = MakeBaViews(2);
+    const std::vector<RpcAffine> identity = IdentityAffines(2);
+    constexpr int kBands = 10;
+    // Data ends at 45% of the span: measures at col < 47500 bracket
+    // centers <= 47500 (band 4), so bands 5..9 carry no data at all.
+    const double kDataHi = kColLo + 0.45 * (kColHi - kColLo);
+
+    const std::vector<Pt> pts = MakePoints(240, views[0]);
+    std::vector<RpcBaPoint> points;
+    points.reserve(pts.size() + 5);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        RpcBaPoint pt;
+        pt.lon = pts[i].lon;
+        pt.lat = pts[i].lat;
+        pt.height = pts[i].alt;
+        for (int v = 0; v < 2; ++v) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[static_cast<std::size_t>(v)],
+                              pt.lon,
+                              pt.lat,
+                              pt.height,
+                              c,
+                              r);
+            const double raw_c = c;
+            c += LeftWave(raw_c, 4.0);
+            r += LeftWave(raw_c, 3.0);
+            pt.measures.push_back(RpcBaMeasure{v, c, r});
+        }
+        points.push_back(pt);
+    }
+    // One GCP per COVERED band: every band region needs an absolute
+    // anchor -- where a region has none, its common mode is free, the
+    // ground blocks can absorb the wave, and the virtual points then
+    // break the tie towards "no correction" (the observability caveat,
+    // now with a preference).
+    int gcps_added = 0;
+    std::vector<char> band_taken(kBands, 0);
+    for (std::size_t i = 0; i < pts.size() && gcps_added < 5; ++i) {
+        double c = 0.0;
+        double r = 0.0;
+        rpc_forward_point(views[0], pts[i].lon, pts[i].lat, pts[i].alt, c, r);
+        const int band =
+            static_cast<int>((c - kColLo) / (kColHi - kColLo) * kBands);
+        if (c < kDataHi && !band_taken[static_cast<std::size_t>(band)]) {
+            points[i].ground_fixed = true;
+            band_taken[static_cast<std::size_t>(band)] = 1;
+            ++gcps_added;
+        }
+    }
+    ASSERT_EQ(gcps_added, 5);
+    // Keep only the covered measures (the starved bands must carry no
+    // data at all), dropping points that fall below 2 measures.
+    {
+        std::vector<RpcBaPoint> kept;
+        kept.reserve(points.size());
+        for (RpcBaPoint& pt : points) {
+            const std::size_t need = pt.ground_fixed ? 1 : 2;
+            RpcBaPoint keep = pt;
+            keep.measures.clear();
+            for (const RpcBaMeasure& m : pt.measures) {
+                if (m.col < kDataHi) {
+                    keep.measures.push_back(m);
+                }
+            }
+            if (keep.measures.size() >= need) {
+                kept.push_back(std::move(keep));
+            }
+        }
+        points = std::move(kept);
+    }
+    ASSERT_GT(points.size(), std::size_t{20});
+
+    const auto Solve = [&](double sigma) {
+        std::vector<RpcAffineGridded> net(2);
+        for (int s = 0; s < 2; ++s) {
+            net[static_cast<std::size_t>(s)] = *RpcAffineGridded::MakeUniform(
+                identity[static_cast<std::size_t>(s)],
+                kColLo,
+                kColHi,
+                kBands,
+                RpcAffineGridBasis::Linear);
+            for (int i = 0; i < kBands; ++i) {
+                net[static_cast<std::size_t>(s)].set_cell_shift(i, 5.0, -4.0);
+            }
+        }
+        RpcBaGridOptions options;
+        options.fix_scene_affines = true;
+        options.virtual_control_sigma_px = sigma;
+        options.virtual_points_per_cell = 3;
+        const RpcBaReport rep =
+            solve_rpc_bundle_adjust_gridded(views, points, net, options);
+        EXPECT_TRUE(rep.ok) << rep.message;
+        return net;
+    };
+
+    const std::vector<RpcAffineGridded> plain = Solve(0.0);
+    const std::vector<RpcAffineGridded> pinned = Solve(8.0);
+
+    for (int s = 0; s < 2; ++s) {
+        const RpcAffineGridded& obj = plain[static_cast<std::size_t>(s)];
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            if (obj.cell(i).col_lo >= 50000.0 && i + 1 < obj.num_cells()) {
+                // No virtual points: nothing observes the starved
+                // bands, so the stale warm start survives exactly.
+                EXPECT_DOUBLE_EQ(obj.cell(i).dx, 5.0)
+                    << "scene " << s << " cell " << i;
+                EXPECT_DOUBLE_EQ(obj.cell(i).dy, -4.0)
+                    << "scene " << s << " cell " << i;
+            }
+        }
+    }
+    for (int s = 0; s < 2; ++s) {
+        const RpcAffineGridded& obj = pinned[static_cast<std::size_t>(s)];
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            const double cc = 0.5 * (obj.cell(i).col_lo + obj.cell(i).col_hi);
+            double ec = 0.0;
+            double er = 0.0;
+            obj.Apply(cc, 25000.0, ec, er);
+            if (obj.cell(i).col_lo < 50000.0) {
+                // Covered bands: at this weak sigma the prior barely
+                // touches them; the composite still carries the wave.
+                EXPECT_NEAR(ec, cc + LeftWave(cc, 4.0), 1.0)
+                    << "scene " << s << " cell " << i;
+                EXPECT_NEAR(er, 25000.0 + LeftWave(cc, 3.0), 1.0)
+                    << "scene " << s << " cell " << i;
+            } else if (i + 1 < obj.num_cells()) {
+                // Starved bands: the pseudo-observations own the normal
+                // equation, so the correction collapses to ~0 (the wave
+                // there is unobserved and the prior asserts no
+                // correction). The derived last cell carries the
+                // zero-mean tail instead (never pinned; see the options
+                // docs) and stays convention-determined, as in the
+                // plain run.
+                EXPECT_NEAR(ec - cc, 0.0, 0.8)
+                    << "scene " << s << " cell " << i;
+                EXPECT_NEAR(er - 25000.0, 0.0, 0.8)
+                    << "scene " << s << " cell " << i;
+            }
+        }
+    }
+}
+
+// At a weak sigma the pseudo-observations must not fight genuine
+// structure: the GCP-anchored wave solve (whose truth corrections run to
+// ~8 px) with virtual control armed at 20 px keeps the COMPOSITE within
+// ~1.5 px of the same network solved without it. The residual effect is
+// a small sag of the composite towards zero between the absolute
+// anchors -- the prior's strength is 1/sigma^2, so guarding against
+// drift costs a proportional bias (a knob, not a free lunch).
+TEST(SolveRpcBundleAdjustGridded, VirtualControlDoesNotFightGcps) {
+    const std::vector<RpcInfo> views = MakeBaViews(3);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(3);
+    Network data = MakeWaveNetwork(views, truth, 4.0, 3.0, 150, 3, 0.0, 5);
+    // One GCP per band: a region without an absolute anchor has a free
+    // common mode, and the virtual points then tilt it towards "no
+    // correction" (the observability caveat with a preference).
+    std::vector<Pt> gcp_pts;
+    for (std::size_t idx : ColStridedIndices(views, data.pts, 12)) {
+        gcp_pts.push_back(data.pts[idx]);
+    }
+    const std::vector<RpcBaPoint> gcps =
+        MakeWaveGcps(views, truth, 4.0, 3.0, gcp_pts, 0.0, 9);
+    data.points.insert(data.points.end(), gcps.begin(), gcps.end());
+
+    std::vector<RpcAffineGridded> base =
+        FreshGriddedNet(3, 12, RpcAffineGridBasis::Linear);
+    ASSERT_TRUE(solve_rpc_bundle_adjust_gridded(views, data.points, base).ok);
+
+    RpcBaGridOptions options;
+    options.virtual_control_sigma_px = 20.0;
+    options.virtual_points_per_cell = 3;
+    std::vector<RpcAffineGridded> net =
+        FreshGriddedNet(3, 12, RpcAffineGridBasis::Linear);
+    const RpcBaReport report =
+        solve_rpc_bundle_adjust_gridded(views, data.points, net, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    EXPECT_EQ(report.num_points, 150);
+    EXPECT_EQ(report.num_gcps, 12);
+    EXPECT_LT(report.rms_after_px, 0.5);
+    // The prior's net effect on the COMPOSITE (the affine-vs-cells
+    // decomposition may redistribute freely -- the gauge other tests pin
+    // is not the prior's business).
+    for (int s = 0; s < 3; ++s) {
+        const RpcAffineGridded& obj = net[static_cast<std::size_t>(s)];
+        const RpcAffineGridded& ref = base[static_cast<std::size_t>(s)];
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            const double center =
+                0.5 * (obj.cell(i).col_lo + obj.cell(i).col_hi);
+            double pc = 0.0;
+            double pr = 0.0;
+            double bc = 0.0;
+            double br = 0.0;
+            obj.Apply(center, 25000.0, pc, pr);
+            ref.Apply(center, 25000.0, bc, br);
+            EXPECT_NEAR(pc, bc, 2.5) << "scene " << s << " cell " << i;
+            EXPECT_NEAR(pr, br, 2.5) << "scene " << s << " cell " << i;
+        }
+    }
+}
+
 // ===================== robust multi-pass driver =============================
 
 // The full robust ladder over a noisy, outlier-corrupted 2D error field:

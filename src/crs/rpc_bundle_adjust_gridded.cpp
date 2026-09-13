@@ -27,6 +27,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -182,6 +183,64 @@ struct ShiftSmoothness {
     }
 
     double weight_;
+};
+
+// Virtual control residual: the COMPOSITE correction (affine + cell
+// shift) at one sampled pixel, pinned towards zero at 1/sigma px -- the
+// pseudo-observation behind virtual_control_sigma_px. The sampled pixel
+// plays "the raw RPC projection of a virtual ground point" (any pixel in
+// the image is the RPC projection of some ground point over the height
+// range), so the residual needs neither a ground block nor an RPC
+// evaluation: it is a pure function of the camera parameters. Parameter
+// blocks arrive as [aff_terms..., shift_terms...] (the same MeasureLayout
+// accumulation as GriddedReprojError, derived scene and derived cell
+// expansions included).
+struct VirtualControlError {
+    VirtualControlError(double col,
+                        double row,
+                        double sigma,
+                        MeasureLayout layout)
+        : col_(col), row_(row), layout_(std::move(layout)) {
+        inv_sigma_ = 1.0 / ((sigma > 0.0) ? sigma : 1.0);
+    }
+
+    template<typename T>
+    bool operator()(T const* const* params, T* residuals) const {
+        T p0 = T(layout_.aff_const[0]);
+        T p1 = T(layout_.aff_const[1]);
+        T p2 = T(layout_.aff_const[2]);
+        T p3 = T(layout_.aff_const[3]);
+        T p4 = T(layout_.aff_const[4]);
+        T p5 = T(layout_.aff_const[5]);
+        std::size_t idx = 0;
+        for (const auto& term : layout_.aff_terms) {
+            const auto& coef = term.second;
+            p0 += T(coef[0]) * params[idx][0];
+            p1 += T(coef[1]) * params[idx][1];
+            p2 += T(coef[2]) * params[idx][2];
+            p3 += T(coef[3]) * params[idx][3];
+            p4 += T(coef[4]) * params[idx][4];
+            p5 += T(coef[5]) * params[idx][5];
+            ++idx;
+        }
+        T d0 = T(0.0);
+        T d1 = T(0.0);
+        for (const auto& term : layout_.shift_terms) {
+            d0 += T(term.second[0]) * params[idx][0];
+            d1 += T(term.second[1]) * params[idx][1];
+            ++idx;
+        }
+        residuals[0] =
+            (p0 + (p1 * col_) + (p2 * row_) + d0 - T(col_)) * T(inv_sigma_);
+        residuals[1] =
+            (p3 + (p4 * col_) + (p5 * row_) + d1 - T(row_)) * T(inv_sigma_);
+        return true;
+    }
+
+    double col_;
+    double row_;
+    double inv_sigma_;
+    MeasureLayout layout_;
 };
 
 // Per-scene solve storage: everything one scene contributes, in CANONICAL
@@ -740,7 +799,8 @@ RpcBaReport solve_rpc_bundle_adjust_gridded(
     const bool has_prior = options.affine_prior_weight > 0.0 ||
                            options.identity_prior_px > 0.0 ||
                            options.cell_shift_prior_weight > 0.0 ||
-                           options.cell_shift_smoothness_weight > 0.0;
+                           options.cell_shift_smoothness_weight > 0.0 ||
+                           options.virtual_control_sigma_px > 0.0;
     double net = 0.0;
     for (const RpcBaPoint& t : ties) {
         net += 2.0 * static_cast<double>(t.measures.size()) -
@@ -930,6 +990,127 @@ RpcBaReport solve_rpc_bundle_adjust_gridded(
                 }
                 if (i + cols < count) {
                     AddPair(i, i + cols);  // vertical neighbor
+                }
+            }
+        }
+    }
+
+    // Virtual control points: sampled uniformly in pixel space, one
+    // stratum per cell so every cell region is covered whatever the
+    // match distribution (including regions with NO matches, which the
+    // data cannot anchor and the parameter priors reach only through
+    // the parameterization's footprint). The FIRST point of each cell
+    // sits at the cell CENTER -- under the tent basis a center pixel
+    // weights its own cell 1.0, so each cell's value is directly
+    // observed and the data-free cells' normal block stays
+    // well-conditioned (pure interior samples weight the neighbors
+    // nearly as much and leave adjacent-cell checkerboard modes nearly
+    // unconstrained). Rows: a one-row (column-banding) grid stores a
+    // DEGENERATE row range, but the affine's row-linear terms make the
+    // composite correction genuinely row-dependent -- pinning at the
+    // degenerate range pins the wrong field -- so the row coordinate
+    // samples the scene's OBSERVED measure span instead when the cell's
+    // own range is degenerate. Deterministic sampling: a fixed LCG
+    // rather than <random> (uniform_real_distribution is
+    // implementation-defined), seeded per scene, so solves are
+    // reproducible bit for bit. Affine-only scenes are skipped --
+    // identity_prior_px is their pixel-unit prior already.
+    if (options.virtual_control_sigma_px > 0.0) {
+        const auto ObservedRowSpan = [&](std::size_t scene) {
+            double lo = std::numeric_limits<double>::infinity();
+            double hi = -lo;
+            const auto Scan = [&](const RpcBaPoint& pt) {
+                for (const RpcBaMeasure& m : pt.measures) {
+                    if (m.view == static_cast<int>(scene)) {
+                        lo = std::min(lo, m.row);
+                        hi = std::max(hi, m.row);
+                    }
+                }
+            };
+            for (const RpcBaPoint& t : ties) {
+                Scan(t);
+            }
+            for (const RpcBaPoint& g : gcps) {
+                Scan(g);
+            }
+            return std::array<double, 2>{lo, hi};
+        };
+        const int per_cell = (options.virtual_points_per_cell >= 1)
+                                 ? options.virtual_points_per_cell
+                                 : 4;
+        for (std::size_t s = 0; s < scene_params.size(); ++s) {
+            SceneParams& sp = scene_params[s];
+            if (sp.shift.empty()) {
+                continue;
+            }
+            const std::array<double, 2> observed = ObservedRowSpan(s);
+            std::uint64_t state =
+                0x243F6A8885A308D3ULL ^ static_cast<std::uint64_t>(s);
+            const auto NextUnit = [&state]() {
+                state = (state * 0x5851F42D4C957F2DULL) + 0x14057B7EF767814FULL;
+                // The top 53 bits: a uniform double in [0, 1).
+                return static_cast<double>(state >> 11) * 0x1.0p-53;
+            };
+            for (std::size_t i = 0; i < sp.shift.size(); ++i) {
+                // Skip the DERIVED (canonically last) cell: its shift is
+                // minus the sum of the free cells', and "composite
+                // correction ~ 0 at every pixel" needs a NONZERO shift
+                // sum whenever the scene affine carries a genuine
+                // correction -- pinning the derived cell's pixels fights
+                // every other cell through the zero-mean constraint.
+                // The derived corner stays convention-determined, the
+                // same as in a data-free region without the prior.
+                if (i + 1 == sp.shift.size()) {
+                    continue;
+                }
+                double rlo = sp.row_range[i][0];
+                double rhi = sp.row_range[i][1];
+                if (rhi - rlo <= 1.0 && observed[1] - observed[0] > 1.0) {
+                    rlo = observed[0];
+                    rhi = observed[1];
+                }
+                for (int k = 0; k < per_cell; ++k) {
+                    double col = 0.0;
+                    double row = 0.0;
+                    if (k == 0) {
+                        col = sp.col_center[i];
+                        row = 0.5 * (rlo + rhi);
+                    } else {
+                        col = sp.col_range[i][0] +
+                              NextUnit() *
+                                  (sp.col_range[i][1] - sp.col_range[i][0]);
+                        row = rlo + NextUnit() * (rhi - rlo);
+                    }
+                    MeasureLayout lay =
+                        MakeLayout(static_cast<int>(s), col, row);
+                    std::vector<double*> blocks;
+                    blocks.reserve(lay.aff_terms.size() +
+                                   lay.shift_terms.size());
+                    for (const auto& term : lay.aff_terms) {
+                        blocks.push_back(term.first);
+                    }
+                    for (const auto& term : lay.shift_terms) {
+                        blocks.push_back(term.first);
+                    }
+                    if (blocks.empty()) {
+                        continue;  // single-cell scene: nothing floats
+                    }
+                    const std::size_t num_aff = lay.aff_terms.size();
+                    const std::size_t num_shift = lay.shift_terms.size();
+                    auto* fn = new ceres::DynamicAutoDiffCostFunction<
+                        VirtualControlError>(new VirtualControlError(
+                        col,
+                        row,
+                        options.virtual_control_sigma_px,
+                        std::move(lay)));
+                    fn->SetNumResiduals(2);
+                    for (std::size_t a = 0; a < num_aff; ++a) {
+                        fn->AddParameterBlock(6);
+                    }
+                    for (std::size_t b = 0; b < num_shift; ++b) {
+                        fn->AddParameterBlock(2);
+                    }
+                    problem.AddResidualBlock(fn, nullptr, blocks);
                 }
             }
         }

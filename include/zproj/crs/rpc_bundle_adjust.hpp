@@ -310,6 +310,44 @@ struct RpcBaGridOptions : RpcBaOptions {
     // whose majority is noise -- a support floor can, by refusing to fit
     // it. 0 disables.
     int min_measures_per_cell = 0;
+    // ---- virtual control points ---------------------------------------
+    //
+    // Pseudo-observations sampled uniformly in PIXEL space, one stratum
+    // per cell (so every cell region is covered whatever the match
+    // distribution), pinning the COMPOSITE correction (affine + cell
+    // shifts) towards zero -- the identity_prior_px statement
+    // generalized from the affine parameters to the full correction
+    // field, spatially sampled. Two things the parameter priors cannot
+    // do: it reaches regions WITHOUT matches (the tent basis's
+    // constant-extension zones are otherwise only data-anchored, and a
+    // starved cell otherwise keeps whatever its warm start left), and
+    // it never double-counts the affine-vs-cell decomposition (only the
+    // total correction at the sampled pixel is charged). sigma is the
+    // trusted absolute accuracy of the RPC georeferencing in px -- the
+    // same meaning as identity_prior_px; weaken or disable when GCPs
+    // anchor the network absolutely, since the pseudo-observations
+    // assert the RPC is right exactly where GCPs say otherwise. 0
+    // disables. Affine-only scenes (no cells) keep identity_prior_px.
+    // These are priors, not observations: they stay out of the reports'
+    // RMS and counts. Sampling notes: the first point of each cell sits
+    // at the cell center (a center pixel weights its own cell 1.0 under
+    // the tent basis, keeping data-free cells' normal block
+    // well-conditioned); the derived (canonically last) cell carries NO
+    // points -- "composite ~ 0 everywhere" needs a nonzero shift sum
+    // whenever the affine carries a genuine correction, which fights the
+    // per-scene zero-mean exactly there --; and on a one-row
+    // (column-banding) grid the row coordinate samples the scene's
+    // OBSERVED row span (the stored row range is degenerate, but the
+    // affine's row-linear terms make the composite genuinely
+    // row-dependent). Best with a free or near-identity affine (the
+    // two-stage satellite regime); a large frozen affine makes the
+    // pinning cancel it through the cells, fighting the zero-mean sum.
+    double virtual_control_sigma_px = 0.0;
+    // Virtual control points per cell region when the sigma above is
+    // armed; values < 1 mean 4. The sampling schedule is deterministic
+    // (a fixed generator, no RNG library), so solves are reproducible
+    // bit for bit.
+    int virtual_points_per_cell = 0;
 };
 
 // One measure's reprojection residual, evaluated with the gridded solve's
@@ -400,8 +438,8 @@ RpcBaTwoStageReport solve_rpc_bundle_adjust_two_stage(
 //      measure floor (a 2-measure tie point with one bad measure has no
 //      majority to heal from) goes entirely;
 //   3. optional per-pass median_cell_init / cell_shift_smoothness_weight
-//      / min_measures_per_cell (the grid knobs above) travel with every
-//      pass through the base options.
+//      / min_measures_per_cell / virtual_control_sigma_px (the grid
+//      knobs above) travel with every pass through the base options.
 //
 // Each pass warm-starts from the previous (`corrected` in/out) and the
 // final pass should carry trim_mad_k <= 0 -- trimming after the last
