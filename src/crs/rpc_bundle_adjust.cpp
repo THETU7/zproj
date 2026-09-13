@@ -366,13 +366,17 @@ RpcBaReport solve_rpc_bundle_adjust(const std::vector<RpcInfo>& views,
                 problem.AddResidualBlock(
                     MakeDerivedReprojCost(
                         v, m.col, m.row, options.pixel_sigma, num_free),
-                    NewLoss(options.robust_threshold_px, options.pixel_sigma),
+                    NewLoss(options.loss_kind,
+                            options.robust_threshold_px,
+                            options.pixel_sigma),
                     params);
                 continue;
             }
             problem.AddResidualBlock(
                 MakeReprojCost(v, m.col, m.row, options.pixel_sigma),
-                NewLoss(options.robust_threshold_px, options.pixel_sigma),
+                NewLoss(options.loss_kind,
+                        options.robust_threshold_px,
+                        options.pixel_sigma),
                 blocks[static_cast<std::size_t>(m.view)].data(),
                 ground_block);
         }

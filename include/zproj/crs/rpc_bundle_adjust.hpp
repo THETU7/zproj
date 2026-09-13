@@ -107,8 +107,10 @@ struct RpcBaOptions {
     RpcAffineDoF dof = RpcAffineDoF::Full;
     // Residual normalization in pixels (ASP's pixel_sigma).
     double pixel_sigma = 1.0;
-    // Huber threshold in pixels; <= 0 disables the robust loss.
+    // Robust-loss threshold in pixels; <= 0 disables the robust loss.
     double robust_threshold_px = 0.0;
+    // The loss shape robust_threshold_px arms (see RpcLossKind).
+    RpcLossKind loss_kind = RpcLossKind::Huber;
     // Tikhonov weight pulling each floated affine towards identity. 0
     // disables. Under zero_mean_affines it regularizes the differential
     // parameters only.
@@ -268,6 +270,60 @@ struct RpcBaGridOptions : RpcBaOptions {
     // only the cell shifts -- stage 2 of the two-stage flow. The affine
     // prior knobs and zero_mean_affines are then moot (ignored).
     bool fix_scene_affines = false;
+    // ---- robustness knobs (see solve_rpc_bundle_adjust_robust) --------
+    //
+    // Stage-1 (global affine) overrides for the two-stage driver:
+    // nullopt falls back to robust_threshold_px / loss_kind. The staging
+    // wants a LOOSE stage-1 threshold (~ the largest local structure the
+    // grid is expected to absorb): at stage 1 that structure is still
+    // unmodeled and shows up as large-but-genuine residuals that a tight
+    // loss would suppress.
+    std::optional<double> affine_robust_threshold_px;
+    std::optional<RpcLossKind> affine_loss_kind;
+    // Warm-start every free cell's shift at the per-cell MEDIAN of its
+    // measures' offsets against the (scene affine only) projection of the
+    // triangulated ground -- a 50%-breakdown estimate for a model whose
+    // per-cell part is a pure translation. The incoming cell shifts are
+    // DISCARDED (zeroed first, so the ground triangulation runs
+    // shift-free); a converged warm start's medians reproduce its own
+    // shifts, so re-running a solved network is near-idempotent. Cheap
+    // (one forward projection per measure) and makes the Ceres polish
+    // start inside the right basin under heavy mismatch noise.
+    bool median_cell_init = false;
+    // First-difference prior between the shifts of adjacent cells
+    // (horizontal + vertical neighbors on the regular tensor grid,
+    // residual = w * (d_a - d_b), Linear basis scenes only): the physical
+    // error fields the grid models (distortion, stitching) are smooth, so
+    // this suppresses isolated-cell spikes from noise while leaving
+    // genuine structure. Like cell_shift_prior_weight, the weight is
+    // relative to the pixel_sigma-normalized residuals: a w-weighted
+    // prior charges (w * delta_px / pixel_sigma)^2 for an adjacent-cell
+    // difference of delta_px. Pairs touching the derived (canonically
+    // last) cell are omitted -- its shift is minus the sum of the others.
+    // 0 disables.
+    double cell_shift_smoothness_weight = 0.0;
+    // Minimum MEASURES per cell (containing-cell accounting, ties + GCPs)
+    // for a cell's shift to float; cells below the floor (and cells with
+    // no measures at all) fall back to the scene affine: their shift is
+    // zeroed and held constant through the solve. The statistical
+    // robustifiers (loss, median init, MAD trimming) cannot save a cell
+    // whose majority is noise -- a support floor can, by refusing to fit
+    // it. 0 disables.
+    int min_measures_per_cell = 0;
+};
+
+// One measure's reprojection residual, evaluated with the gridded solve's
+// final model (scene affine + cell shifts + optimized ground) -- the
+// out-record for caller-side robust filtering between multi-pass solves
+// (see solve_rpc_bundle_adjust_robust). res_col/res_row are
+// model - observed, in pixels.
+struct RpcBaMeasureResidual {
+    int point = 0;    // index into the `points` vector passed to the solve
+    int measure = 0;  // index into points[point].measures
+    int scene = 0;    // the measure's scene (RpcBaMeasure::view)
+    int cell = -1;    // containing cell, -1 for a scene without cells
+    double res_col = 0.0;
+    double res_row = 0.0;
 };
 
 // Gridded solve: float every scene's global affine plus its cells'
@@ -275,12 +331,14 @@ struct RpcBaGridOptions : RpcBaOptions {
 // one RpcAffineGridded per scene (parallel to `scenes`): its affine and
 // cell shifts are the initial guess and are overwritten only on success
 // (the grid structure -- cell ranges, count, basis -- is taken as
-// given).
+// given). `residuals`, when non-null, receives one entry per used
+// measure on success (empty on failure).
 RpcBaReport solve_rpc_bundle_adjust_gridded(
     const std::vector<RpcInfo>& scenes,
     const std::vector<RpcBaPoint>& points,
     std::vector<RpcAffineGridded>& corrected,
-    const RpcBaGridOptions& options = {});
+    const RpcBaGridOptions& options = {},
+    std::vector<RpcBaMeasureResidual>* residuals = nullptr);
 
 // Two-stage report: each stage's plain report, in order. The final
 // corrections live in `corrected` (stage 1's affine + stage 2's shifts).
@@ -294,10 +352,113 @@ struct RpcBaTwoStageReport {
 // floats the cell shifts. `corrected` carries one RpcAffineGridded per
 // scene; its affine is stage 1's in/out value and its cells are stage
 // 2's. The stage reports land in the two-stage report; `ok` per stage.
+// `residuals`, when non-null, receives stage 2's per-measure residuals
+// (the final model's). Stage 1's loss settings come from
+// affine_robust_threshold_px / affine_loss_kind when set, else the base
+// robust_threshold_px / loss_kind; stage 2 always uses the base pair.
 RpcBaTwoStageReport solve_rpc_bundle_adjust_two_stage(
     const std::vector<RpcInfo>& scenes,
     const std::vector<RpcBaPoint>& points,
     std::vector<RpcAffineGridded>& corrected,
-    const RpcBaGridOptions& options = {});
+    const RpcBaGridOptions& options = {},
+    std::vector<RpcBaMeasureResidual>* residuals = nullptr);
+
+// ========================= robust variant ==================================
+//
+// solve_rpc_bundle_adjust_robust(): the multi-pass driver for noisy
+// control networks -- tie-point match pipelines deliver a few percent of
+// gross mismatches (repetitive texture, clouds, water), and the gridded
+// model amplifies them: each cell's shift is a 2-parameter L2 estimate
+// whose breakdown point is zero, so a single outlier drags a weakly
+// covered cell and (through the per-scene zero-mean) nudges every other
+// cell. Absolute pixel thresholds cannot separate "genuine local
+// structure" from "noise" -- a cell with a real 8 px offset and a clean
+// cell with an 8 px outlier look identical -- so the driver combines the
+// defenses, loose-to-tight:
+//
+//   1. per-pass stage-wise LOSS settings (soft, inside Ceres' LM
+//      iterations): a wide stage-1 threshold (~ the largest structure
+//      the grid should absorb, so genuine local structure is not
+//      suppressed where it is still unmodeled) tightening to a small
+//      stage-2 one (the residual vs the full model is pure noise +
+//      outliers by then);
+//   2. between passes, per-measure TRIMMING by (scene, cell) group:
+//      a measure is a CANDIDATE when its residual deviates from the
+//      group's median by more than trim_mad_k robust sigmas (1.4826 *
+//      MAD) -- the threshold FOLLOWS each cell's own offset, which is
+//      exactly the per-cell-offset inconsistency that defeats absolute
+//      thresholds -- floored at trim_floor_px so a clean (MAD ~ 0) group
+//      trims nothing. Groups smaller than 3 measures keep everything
+//      (the median of 1-2 measures carries no scale). Candidates are
+//      then applied PER POINT, worst-first, one per pass: a bad measure
+//      contaminates its whole point's ground block (the triangulation
+//      init is plain least squares) and misfits the point's CLEAN
+//      measures too, so independent per-measure drops would cull the
+//      clean majority alongside the outlier. Dropping only the worst
+//      candidate keeps the majority, and the next pass's fresh
+//      triangulation heals the spared measures; a point already at its
+//      measure floor (a 2-measure tie point with one bad measure has no
+//      majority to heal from) goes entirely;
+//   3. optional per-pass median_cell_init / cell_shift_smoothness_weight
+//      / min_measures_per_cell (the grid knobs above) travel with every
+//      pass through the base options.
+//
+// Each pass warm-starts from the previous (`corrected` in/out) and the
+// final pass should carry trim_mad_k <= 0 -- trimming after the last
+// solve is wasted. The graduated ladder (e.g. thresholds 3 pass widths
+// apart, k 4 -> 3 -> 2, echoing the classic 32/8/2 px schedule) exists
+// because a single tight pass risks culling the good measures of a
+// genuinely-offset cell BEFORE the model has absorbed the offset;
+// loose-first keeps every basin reachable.
+
+// One pass of the ladder.
+struct RpcBaRobustPass {
+    // This pass's stage-1 / stage-2 loss thresholds in px (0 disables the
+    // respective loss). A non-empty ladder sets BOTH explicitly on every
+    // pass; the base options' robust_threshold_px /
+    // affine_robust_threshold_px apply only to the empty-ladder single
+    // pass.
+    double affine_robust_threshold_px = 0.0;
+    double grid_robust_threshold_px = 0.0;
+    // Post-pass trim: measures deviating from their (scene, cell) group's
+    // residual median by more than this many robust sigmas (1.4826 * MAD,
+    // floored at trim_floor_px) become candidates, applied per point
+    // (worst-first; see the notes above). <= 0: no trim (the last pass).
+    // Recommended ladder: 4 -> 3 -> 2 -> 0.
+    double trim_mad_k = 0.0;
+};
+
+struct RpcBaRobustOptions : RpcBaGridOptions {
+    // The pass ladder, loose -> tight. Empty means a single un-tuned pass
+    // with the base options' loss settings and no trim.
+    std::vector<RpcBaRobustPass> passes;
+    // MAD-trim floor in px: the trim radius of a (scene, cell) group is
+    // max(trim_mad_k * 1.4826 * MAD, trim_floor_px).
+    double trim_floor_px = 1.0;
+};
+
+struct RpcBaRobustReport {
+    // True when every pass solved; `corrected` then holds the last pass's
+    // solution. A failed pass stops the ladder, leaves `corrected` at
+    // the last SUCCESSFUL pass's solution (a pass that cannot solve
+    // should not contribute), and reports false.
+    bool ok = false;
+    std::vector<RpcBaTwoStageReport> passes;  // one per executed pass
+    int num_measures_trimmed = 0;             // total across passes
+    // Points removed entirely: at their measure floor (2 ties / 1 GCP)
+    // with a still-gross candidate -- no majority to heal from.
+    int num_points_dropped = 0;
+    std::string message;
+};
+
+// Robust multi-pass solve: runs the two-stage driver per pass over a
+// shrinking control network (see above), warm-starting `corrected`
+// throughout. `corrected` is one RpcAffineGridded per scene as in the
+// two-stage solve.
+RpcBaRobustReport solve_rpc_bundle_adjust_robust(
+    const std::vector<RpcInfo>& scenes,
+    const std::vector<RpcBaPoint>& points,
+    std::vector<RpcAffineGridded>& corrected,
+    const RpcBaRobustOptions& options = {});
 
 }  // namespace zproj::crs

@@ -189,15 +189,27 @@ inline std::unique_ptr<ceres::Manifold> MakeAffineManifold(RpcAffineDoF dof) {
 // Loss function factory: Ceres' Problem takes ownership of each residual
 // block's loss function, so a FRESH instance must be handed to every
 // AddResidualBlock. Null return disables the robust loss.
-inline ceres::LossFunction* NewLoss(double robust_threshold_px,
+inline ceres::LossFunction* NewLoss(RpcLossKind kind,
+                                    double robust_threshold_px,
                                     double pixel_sigma) {
-    if (robust_threshold_px <= 0.0) {
-        return nullptr;
-    }
     // Residuals are already normalized by pixel_sigma, so divide the pixel
     // threshold by the same sigma to keep its pixel meaning.
-    const double sigma = (pixel_sigma > 0.0) ? pixel_sigma : 1.0;
-    return new ceres::HuberLoss(robust_threshold_px / sigma);
+    const double a =
+        robust_threshold_px / ((pixel_sigma > 0.0) ? pixel_sigma : 1.0);
+    switch (kind) {
+        case RpcLossKind::Huber:
+            return (robust_threshold_px > 0.0) ? new ceres::HuberLoss(a)
+                                               : nullptr;
+        case RpcLossKind::Cauchy:
+            return (robust_threshold_px > 0.0) ? new ceres::CauchyLoss(a)
+                                               : nullptr;
+        case RpcLossKind::Tukey:
+            return (robust_threshold_px > 0.0) ? new ceres::TukeyLoss(a)
+                                               : nullptr;
+        case RpcLossKind::None:
+            break;
+    }
+    return nullptr;
 }
 
 // One observation's squared reprojection error, evaluated outside Ceres (for

@@ -531,6 +531,22 @@ struct RpcGcp {
     double row = 0.0;
 };
 
+// The robust loss shape applied to the pixel residuals when
+// robust_threshold_px > 0. All thresholds are in pixels (residuals are
+// normalized by pixel_sigma first, the threshold with them). Huber is the
+// classical photogrammetric default (ASP's --robust-threshold, COLMAP's
+// reprojection loss); the redescending Cauchy/Tukey shapes down-weight
+// large residuals progressively harder -- Tukey's influence reaches zero,
+// which suits heavy mismatch noise at the cost of slightly biasing the
+// fit towards its current basin (start from a loose-threshold pass, or
+// the median warm starts, so the basin is the right one).
+enum class RpcLossKind {
+    None,    // Plain least squares (also the effect of threshold <= 0).
+    Huber,   // Linear beyond the threshold; bounded, never-zero influence.
+    Cauchy,  // Lorentzian; ~1/r influence decay.
+    Tukey,   // Biweight; influence exactly zero beyond ~threshold*2.34.
+};
+
 struct RpcAffineOptions {
     // Parameterization per image.
     RpcAffineDoF dof = RpcAffineDoF::Full;
@@ -538,8 +554,10 @@ struct RpcAffineOptions {
     // divided by this before the loss function, so robust_threshold_px keeps
     // its pixel meaning for any sigma.
     double pixel_sigma = 1.0;
-    // Huber threshold in pixels; <= 0 disables the robust loss.
+    // Robust-loss threshold in pixels; <= 0 disables the robust loss.
     double robust_threshold_px = 0.0;
+    // The loss SHAPE robust_threshold_px arms (see RpcLossKind).
+    RpcLossKind loss_kind = RpcLossKind::Huber;
     // Tikhonov weight pulling each affine towards identity. 0 disables.
     // Recommended for noisy matches-only solves: without an anchor, the
     // weakly observable height-vs-translation gauge lets Levenberg-Marquardt

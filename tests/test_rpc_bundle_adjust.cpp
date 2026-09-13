@@ -1639,6 +1639,587 @@ TEST(SolveRpcBundleAdjust, IdentityPriorPxPinsDriftedWarmStart) {
     }
 }
 
+// Noisy matches with a fraction of gross outliers: the redescending
+// losses (Cauchy, Tukey) must hold the recovery at least as well as the
+// Huber reference above -- same network, same budgets.
+TEST(SolveRpcBundleAdjust, CauchyTukeyLossesRobustToOutliers) {
+    const std::vector<RpcInfo> views = MakeBaViews(5);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(5);
+    const double sigma = 0.2;
+    const Network data = MakeNetwork(views, truth, 200, 4, sigma, 17, 8);
+
+    const zproj::crs::RpcLossKind kinds[2] = {zproj::crs::RpcLossKind::Cauchy,
+                                              zproj::crs::RpcLossKind::Tukey};
+    for (const zproj::crs::RpcLossKind kind : kinds) {
+        RpcBaOptions options;
+        options.pixel_sigma = sigma;
+        options.robust_threshold_px = 3.0 * sigma;
+        options.loss_kind = kind;
+        options.affine_prior_weight = 1.0;
+        std::vector<RpcAffine> out = IdentityAffines(5);
+        const RpcBaReport report =
+            solve_rpc_bundle_adjust(views, data.points, out, options);
+
+        ASSERT_TRUE(report.ok) << report.message;
+        // The report RMS ignores the loss, so the 25 gross outliers keep
+        // it high; the redescending shapes also fit the clean bulk a bit
+        // looser than Huber. Parameter recovery is the assertion below.
+        EXPECT_LT(report.rms_after_px, 8.0);
+        for (int v = 0; v < 5; ++v) {
+            EXPECT_LT(std::fabs(out[static_cast<std::size_t>(v)].p[0] -
+                                truth[static_cast<std::size_t>(v)].p[0]),
+                      50.0)
+                << "view " << v << " translation e0";
+        }
+    }
+}
+
+// ===================== robustness: residuals & grid knobs ===================
+
+using zproj::crs::RpcBaMeasureResidual;
+using zproj::crs::RpcBaRobustOptions;
+using zproj::crs::RpcBaRobustPass;
+using zproj::crs::RpcBaRobustReport;
+using zproj::crs::solve_rpc_bundle_adjust_robust;
+
+// The residual out-record: one entry per used measure, indices that
+// address the caller's network, and a component RMS that matches the
+// report's rms_after_px exactly.
+TEST(SolveRpcBundleAdjustGridded, MeasureResidualsRecorded) {
+    const std::vector<RpcInfo> views = MakeBaViews(3);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(3);
+    Network data = MakeWaveNetwork(views, truth, 4.0, 3.0, 90, 3, 0.2, 61);
+    std::vector<Pt> gcp_pts;
+    for (std::size_t idx : ColStridedIndices(views, data.pts, 6)) {
+        gcp_pts.push_back(data.pts[idx]);
+    }
+    const std::vector<RpcBaPoint> gcps =
+        MakeWaveGcps(views, truth, 4.0, 3.0, gcp_pts, 0.0, 9);
+    data.points.insert(data.points.end(), gcps.begin(), gcps.end());
+
+    std::vector<RpcAffineGridded> net =
+        FreshGriddedNet(3, 10, RpcAffineGridBasis::Linear);
+    std::vector<RpcBaMeasureResidual> residuals;
+    const RpcBaReport report = solve_rpc_bundle_adjust_gridded(
+        views, data.points, net, {}, &residuals);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    ASSERT_EQ(residuals.size(), static_cast<std::size_t>(report.num_measures));
+    double sum = 0.0;
+    for (const RpcBaMeasureResidual& r : residuals) {
+        // The indices address the caller's network.
+        ASSERT_LT(r.point, static_cast<int>(data.points.size()));
+        const RpcBaPoint& pt = data.points[static_cast<std::size_t>(r.point)];
+        ASSERT_LT(r.measure, static_cast<int>(pt.measures.size()));
+        EXPECT_EQ(r.scene,
+                  pt.measures[static_cast<std::size_t>(r.measure)].view);
+        // Every scene carries cells, so every measure has a containing
+        // cell.
+        EXPECT_GE(r.cell, 0);
+        sum += (r.res_col * r.res_col) + (r.res_row * r.res_row);
+    }
+    const double rms =
+        std::sqrt(sum / (2.0 * static_cast<double>(residuals.size())));
+    EXPECT_NEAR(rms, report.rms_after_px, 1e-9);
+}
+
+// The support floor: cells left below min_measures_per_cell (here: cells
+// outside the covered columns, of a warm start that seeded them with a
+// nonzero shift) fall back to the scene affine -- their shift returns
+// exactly zero -- while covered cells keep fitting. Stage-2 semantics
+// (affines held at the truth): under a FREE affine the data-less region's
+// affine tilt vs shift-ramp gauge wanders freely (the documented
+// constant-extension property), which is orthogonal to the floor.
+TEST(SolveRpcBundleAdjustGridded, MinMeasuresPerCellPinsStarvedCells) {
+    const std::vector<RpcInfo> views = MakeBaViews(2);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(2);
+    Network data = MakeWaveNetwork(views, truth, 4.0, 3.0, 120, 2, 0.0, 71);
+    std::vector<Pt> gcp_pts;
+    for (std::size_t idx : ColStridedIndices(views, data.pts, 8)) {
+        gcp_pts.push_back(data.pts[idx]);
+    }
+    const std::vector<RpcBaPoint> gcps =
+        MakeWaveGcps(views, truth, 4.0, 3.0, gcp_pts, 0.0, 9);
+    data.points.insert(data.points.end(), gcps.begin(), gcps.end());
+
+    // Keep only measures in the LEFT half of the col span: the right-half
+    // cells starve.
+    constexpr double kSplit = 0.5 * (kColLo + kColHi);
+    std::vector<RpcBaPoint> half;
+    half.reserve(data.points.size());
+    for (RpcBaPoint& pt : data.points) {
+        RpcBaPoint keep = pt;
+        keep.measures.clear();
+        for (const RpcBaMeasure& m : pt.measures) {
+            if (m.col < kSplit) {
+                keep.measures.push_back(m);
+            }
+        }
+        if (keep.measures.size() >= 2) {
+            half.push_back(std::move(keep));
+        }
+    }
+    ASSERT_GT(half.size(), std::size_t{20});
+
+    // Warm start every cell with a nonzero shift: without the floor the
+    // starved cells would carry the stale seed (nothing observes them).
+    std::vector<RpcAffineGridded> net;
+    for (int s = 0; s < 2; ++s) {
+        net.push_back(
+            *RpcAffineGridded::MakeUniform(truth[static_cast<std::size_t>(s)],
+                                           kColLo,
+                                           kColHi,
+                                           10,
+                                           RpcAffineGridBasis::Linear));
+        for (int i = 0; i < net[static_cast<std::size_t>(s)].num_cells(); ++i) {
+            net[static_cast<std::size_t>(s)].set_cell_shift(i, 5.0, -4.0);
+        }
+    }
+    RpcBaGridOptions options;
+    options.fix_scene_affines = true;
+    options.min_measures_per_cell = 4;
+    const RpcBaReport report =
+        solve_rpc_bundle_adjust_gridded(views, half, net, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    for (int s = 0; s < 2; ++s) {
+        const RpcAffineGridded& obj = net[static_cast<std::size_t>(s)];
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            if (obj.cell(i).col_lo >= kSplit && i + 1 < obj.num_cells()) {
+                // Pinned free cells: exactly the fallback (zero).
+                EXPECT_EQ(obj.cell(i).dx, 0.0)
+                    << "scene " << s << " cell " << i;
+                EXPECT_EQ(obj.cell(i).dy, 0.0)
+                    << "scene " << s << " cell " << i;
+            }
+        }
+        // The canonically last (derived) cell is not a parameter block
+        // and never pins: its value is minus the sum of the free cells',
+        // which for this scene's zero-mean-fitting wave is ~0 (tent
+        // approximation residue), NOT a stale seed.
+        const int last = obj.num_cells() - 1;
+        EXPECT_NEAR(obj.cell(last).dx, 0.0, 1.0);
+        EXPECT_NEAR(obj.cell(last).dy, 0.0, 1.0);
+        // The covered (left) cells still absorb the wave.
+        int fitted = 0;
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            if (obj.cell(i).col_hi <= kSplit - 5000.0) {
+                ++fitted;
+            }
+        }
+        EXPECT_GE(fitted, 3);
+    }
+    EXPECT_LT(report.rms_after_px, 1.0);
+}
+
+// The median warm start selects the basin for a tight redescending
+// loss. A GCP-only network (ground fixed, no triangulation) under the
+// one-hot Constant basis isolates the mechanism exactly: scene 0's cells
+// carry known +-8 px shifts, and from the ZERO start a 2 px Tukey sees
+// every genuine shift as beyond-influence and leaves every cell stuck,
+// while from the per-cell median start the residuals are already zero
+// and the shifts survive -- including the cell where 40% of the measures
+// are +25 px outliers (the median itself is the 50%-breakdown estimate).
+// (The Linear tent basis re-activates across the whole wave through its
+// shared bracket measures, and a free-ground network lets the common
+// mode drain into the ground blocks -- both defeat the isolation.)
+TEST(SolveRpcBundleAdjustGridded, MedianCellInitAnchorsBasin) {
+    const std::vector<RpcInfo> views = MakeBaViews(2);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(2);
+    constexpr int kBands = 10;
+    constexpr int kCorruptBand = 4;
+    // Alternating +-8 px, with the (canonically last) band derived to
+    // keep the sum zero -- the solver's constrained family.
+    std::vector<double> band_shift(kBands, 0.0);
+    double sum = 0.0;
+    for (int i = 0; i + 1 < kBands; ++i) {
+        band_shift[static_cast<std::size_t>(i)] = ((i % 2 == 0) ? 8.0 : -8.0);
+        sum += band_shift[static_cast<std::size_t>(i)];
+    }
+    band_shift[static_cast<std::size_t>(kBands - 1)] = -sum;
+    for (int i = 0; i < kBands; ++i) {
+        EXPECT_LE(std::fabs(band_shift[static_cast<std::size_t>(i)]),
+                  8.0 + 1e-9);
+    }
+
+    // Every point is a GCP observed in both scenes; scene 0's pixels
+    // carry the band shift, and 40% of the corrupted band's scene-0
+    // measures take +25 px.
+    const std::vector<Pt> pts = MakePoints(200, views[0]);
+    std::mt19937 rng(91);
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+    const auto BandOf = [](double col) {
+        return static_cast<int>((col - kColLo) / (kColHi - kColLo) * kBands);
+    };
+    std::vector<RpcBaPoint> points;
+    points.reserve(pts.size());
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        RpcBaPoint pt;
+        pt.ground_fixed = true;
+        pt.lon = pts[i].lon;
+        pt.lat = pts[i].lat;
+        pt.height = pts[i].alt;
+        for (int v = 0; v < 2; ++v) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[static_cast<std::size_t>(v)],
+                              pt.lon,
+                              pt.lat,
+                              pt.height,
+                              c,
+                              r);
+            truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
+            if (v == 0) {
+                const int band = BandOf(c);
+                c += band_shift[static_cast<std::size_t>(band)];
+                if (band == kCorruptBand && coin(rng) < 0.4) {
+                    c += 25.0;
+                }
+            }
+            pt.measures.push_back(RpcBaMeasure{v, c, r});
+        }
+        points.push_back(pt);
+    }
+
+    const auto Solve = [&](bool median_init) {
+        std::vector<RpcAffineGridded> net(2);
+        for (int s = 0; s < 2; ++s) {
+            net[static_cast<std::size_t>(s)] = *RpcAffineGridded::MakeUniform(
+                truth[static_cast<std::size_t>(s)],
+                kColLo,
+                kColHi,
+                kBands,
+                RpcAffineGridBasis::Constant);
+        }
+        RpcBaGridOptions options;
+        options.fix_scene_affines = true;  // isolate the cell stage
+        options.robust_threshold_px = 2.0;
+        options.loss_kind = zproj::crs::RpcLossKind::Tukey;
+        options.median_cell_init = median_init;
+        const RpcBaReport rep =
+            solve_rpc_bundle_adjust_gridded(views, points, net, options);
+        EXPECT_TRUE(rep.ok) << rep.message;
+        return net;
+    };
+
+    const std::vector<RpcAffineGridded> cold = Solve(false);
+    const std::vector<RpcAffineGridded> warmed = Solve(true);
+
+    double cold_worst = 0.0;
+    double warm_worst = 0.0;
+    for (int i = 0; i < kBands; ++i) {
+        cold_worst =
+            std::max(cold_worst,
+                     std::fabs(cold[0].cell(i).dx -
+                               band_shift[static_cast<std::size_t>(i)]));
+        warm_worst =
+            std::max(warm_worst,
+                     std::fabs(warmed[0].cell(i).dx -
+                               band_shift[static_cast<std::size_t>(i)]));
+    }
+    // Cold: every genuine shift sits beyond the Tukey threshold from a
+    // zero start, so the cells never move.
+    EXPECT_GT(cold_worst, 3.0);
+    // Warm: the medians land the cells on their shifts, corrupted band
+    // included, and the polish keeps them there.
+    EXPECT_LT(warm_worst, 0.5);
+}
+
+// The smoothness prior: a thin cell carrying only outlier measures
+// spikes its shift without the prior and stays with its neighbors under
+// it.
+TEST(SolveRpcBundleAdjustGridded, SmoothnessPriorSuppressesSpikes) {
+    const std::vector<RpcInfo> views = MakeBaViews(2);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(2);
+    constexpr double kColAmp = 3.0;
+    constexpr double kRowAmp = 2.0;
+    constexpr int kBands = 10;
+    Network data =
+        MakeWaveNetwork(views, truth, kColAmp, kRowAmp, 200, 2, 0.2, 97);
+
+    // Band 4 of scene 0: every measure drops except two, which are pinned
+    // to the band CENTER (tent weight exactly 1 on band 4, so their pull
+    // cannot leak into the bracketing cells) and carry +15 px col
+    // outliers; points that fall below 2 measures go entirely (keeping
+    // their original measures would re-introduce clean band-4
+    // observations that resist the spike).
+    const auto BandOf = [](double col) {
+        return static_cast<int>((col - kColLo) / (kColHi - kColLo) * kBands);
+    };
+    const double band_center = kColLo + 4.5 * (kColHi - kColLo) / kBands;
+    std::vector<RpcBaPoint> points;
+    points.reserve(data.points.size());
+    int kept_in_band = 0;
+    for (RpcBaPoint& pt : data.points) {
+        RpcBaPoint keep = pt;
+        keep.measures.clear();
+        for (const RpcBaMeasure& m : pt.measures) {
+            if (m.view == 0 && BandOf(m.col) == 4) {
+                if (kept_in_band < 2) {
+                    keep.measures.push_back(
+                        RpcBaMeasure{m.view, band_center + 15.0, m.row});
+                    ++kept_in_band;
+                }
+                continue;  // every other band-4 measure of scene 0 drops
+            }
+            keep.measures.push_back(m);
+        }
+        if (keep.measures.size() >= 2) {
+            points.push_back(std::move(keep));
+        }
+    }
+    // GCPs strided OUTSIDE band 4 only, so no clean observation anchors
+    // the spiked band (the point of the test).
+    std::vector<RpcBaPoint> gcps;
+    {
+        std::vector<Pt> gcp_pts;
+        for (std::size_t idx : ColStridedIndices(views, data.pts, 8)) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[0],
+                              data.pts[idx].lon,
+                              data.pts[idx].lat,
+                              data.pts[idx].alt,
+                              c,
+                              r);
+            if (BandOf(c) != 4) {
+                gcp_pts.push_back(data.pts[idx]);
+            }
+        }
+        gcps = MakeWaveGcps(views, truth, kColAmp, kRowAmp, gcp_pts, 0.0, 9);
+    }
+    points.insert(points.end(), gcps.begin(), gcps.end());
+    ASSERT_EQ(kept_in_band, 2);
+
+    const auto Solve = [&](double smoothness) {
+        std::vector<RpcAffineGridded> net(2);
+        for (int s = 0; s < 2; ++s) {
+            net[static_cast<std::size_t>(s)] = *RpcAffineGridded::MakeUniform(
+                truth[static_cast<std::size_t>(s)],
+                kColLo,
+                kColHi,
+                kBands,
+                RpcAffineGridBasis::Linear);
+        }
+        RpcBaGridOptions options;
+        options.fix_scene_affines = true;
+        options.pixel_sigma = 0.2;
+        options.cell_shift_smoothness_weight = smoothness;
+        const RpcBaReport rep =
+            solve_rpc_bundle_adjust_gridded(views, points, net, options);
+        EXPECT_TRUE(rep.ok) << rep.message;
+        return net;
+    };
+
+    const std::vector<RpcAffineGridded> plain = Solve(0.0);
+    const std::vector<RpcAffineGridded> smooth = Solve(50.0);
+
+    // Band 4's dx relative to its neighbors: a spike without the prior,
+    // suppressed under it.
+    const auto BandDx = [](const RpcAffineGridded& obj, int band) {
+        return obj.cell(band).dx;
+    };
+    const double spike_plain =
+        BandDx(plain[0], 4) - 0.5 * (BandDx(plain[0], 3) + BandDx(plain[0], 5));
+    const double spike_smooth =
+        BandDx(smooth[0], 4) -
+        0.5 * (BandDx(smooth[0], 3) + BandDx(smooth[0], 5));
+    EXPECT_GT(spike_plain, 6.0);
+    EXPECT_LT(spike_smooth, 3.0);
+}
+
+// ===================== robust multi-pass driver =============================
+
+// The full robust ladder over a noisy, outlier-corrupted 2D error field:
+// the trimmed network's final solve beats the un-guarded single solve,
+// the outliers leave as measures (their points survive on the clean
+// measures), and the composite recovers the field.
+TEST(SolveRpcBundleAdjustRobust, LadderTrimsOutliersAndRecovers) {
+    constexpr double kColAmp = 3.0;
+    constexpr double kRowAmp = 2.0;
+    constexpr double kSigma = 0.3;
+    constexpr int kNumCol = 6;
+    constexpr int kNumRow = 4;
+    const std::vector<RpcInfo> views = MakeBaViews(3);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(3);
+
+    // The two-stage 2D-field network plus Gaussian noise and one gross
+    // outlier measure per 9th point (+25 px col, first view).
+    const std::vector<Pt> pts = MakePoints(300, views[0]);
+    std::mt19937 rng(53);
+    std::normal_distribution<double> noise(0.0, kSigma);
+    std::vector<RpcBaPoint> points;
+    points.reserve(pts.size() + 24);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        RpcBaPoint pt;
+        for (int v = 0; v < 3; ++v) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[static_cast<std::size_t>(v)],
+                              pts[i].lon,
+                              pts[i].lat,
+                              pts[i].alt,
+                              c,
+                              r);
+            const double wc = Field2D(c, r, kColAmp, kRowAmp);
+            const double wr = Field2D(c, r, 0.6 * kColAmp, 0.5 * kRowAmp);
+            truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
+            c += wc + noise(rng);
+            r += wr + noise(rng);
+            if (i % 9 == 0 && v == 0) {
+                c += 25.0;  // the gross outlier
+            }
+            pt.measures.push_back(RpcBaMeasure{v, c, r});
+        }
+        points.push_back(pt);
+    }
+    std::vector<RpcAffineGridded> net_template;
+    for (int s = 0; s < 3; ++s) {
+        net_template.push_back(
+            *RpcAffineGridded::MakeUniform2D(RpcAffine::Identity(),
+                                             kColLo,
+                                             kColHi,
+                                             kRowLo,
+                                             kRowHi,
+                                             kNumCol,
+                                             kNumRow,
+                                             RpcAffineGridBasis::Linear));
+    }
+    // One clean GCP per cell region anchors the per-cell common modes.
+    for (std::size_t idx : CellNearestIndices(views, pts, net_template[0])) {
+        RpcBaPoint gcp = points[idx];
+        gcp.ground_fixed = true;
+        gcp.lon = pts[idx].lon;
+        gcp.lat = pts[idx].lat;
+        gcp.height = pts[idx].alt;
+        points.push_back(gcp);
+    }
+
+    // The un-guarded reference: a single two-stage solve, no loss.
+    RpcBaGridOptions plain_options;
+    plain_options.identity_prior_px = 2.0;
+    std::vector<RpcAffineGridded> plain_net = net_template;
+    const RpcBaTwoStageReport plain_report =
+        zproj::crs::solve_rpc_bundle_adjust_two_stage(
+            views, points, plain_net, plain_options);
+    ASSERT_TRUE(plain_report.affine_stage.ok)
+        << plain_report.affine_stage.message;
+    ASSERT_TRUE(plain_report.grid_stage.ok) << plain_report.grid_stage.message;
+
+    // The robust ladder: loose -> tight, MAD trim between passes, median
+    // warm start and a support floor riding along. Huber (the default)
+    // bounds the outliers' influence while keeping it nonzero, so the
+    // points' ground blocks migrate back towards their clean majority --
+    // the trim then only needs to remove the outliers themselves (the
+    // per-point rule spares the collateral clean measures to heal next
+    // pass).
+    RpcBaRobustOptions options;
+    options.identity_prior_px = 2.0;
+    options.pixel_sigma = kSigma;
+    options.median_cell_init = true;
+    options.min_measures_per_cell = 4;
+    options.trim_floor_px = 1.0;
+    options.passes = {
+        RpcBaRobustPass{16.0, 8.0, 4.0},
+        RpcBaRobustPass{8.0, 3.0, 3.0},
+        RpcBaRobustPass{4.0, 2.0, 0.0},
+    };
+    std::vector<RpcAffineGridded> net = net_template;
+    const RpcBaRobustReport report =
+        solve_rpc_bundle_adjust_robust(views, points, net, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    ASSERT_EQ(report.passes.size(), std::size_t{3});
+    // Every 9th of the 300 tie points carries one outlier measure (34 in
+    // total): the trim removes those; the collateral of the ground-block
+    // contamination costs a measure from a few more points (spared by
+    // the per-point rule to heal next pass), and a handful of points
+    // that end at their 2-measure floor with a still-gross measure go
+    // entirely -- the pipeline's honest accounting of an unrecoverable
+    // minority.
+    EXPECT_GE(report.num_measures_trimmed, 30);
+    EXPECT_LE(report.num_measures_trimmed, 50);
+    EXPECT_LE(report.num_points_dropped, 10);
+
+    const double plain_rms = plain_report.grid_stage.rms_after_px;
+    const double robust_rms = report.passes.back().grid_stage.rms_after_px;
+    EXPECT_LT(robust_rms, 0.6);
+    EXPECT_LT(robust_rms, 0.5 * plain_rms);
+
+    // The composite recovers truth affine + field on the cell centers.
+    for (int s = 0; s < 3; ++s) {
+        const RpcAffineGridded& obj = net[static_cast<std::size_t>(s)];
+        for (int i = 0; i < obj.num_cells(); ++i) {
+            const double cc = 0.5 * (obj.cell(i).col_lo + obj.cell(i).col_hi);
+            const double rc = 0.5 * (obj.cell(i).row_lo + obj.cell(i).row_hi);
+            const RpcAffine eff = obj.EffectiveAffine(cc, rc);
+            RpcAffine want = truth[static_cast<std::size_t>(s)];
+            want.p[0] += Field2D(cc, rc, kColAmp, kRowAmp);
+            want.p[3] += Field2D(cc, rc, 0.6 * kColAmp, 0.5 * kRowAmp);
+            double ec = 0.0;
+            double er = 0.0;
+            double wc = 0.0;
+            double wr = 0.0;
+            eff.Apply(cc, rc, ec, er);
+            want.Apply(cc, rc, wc, wr);
+            EXPECT_NEAR(ec, wc, 1.0) << "scene " << s << " cell " << i;
+            EXPECT_NEAR(er, wr, 1.0) << "scene " << s << " cell " << i;
+        }
+    }
+}
+
+// The empty ladder: exactly one pass, the base options' loss settings,
+// nothing trimmed.
+TEST(SolveRpcBundleAdjustRobust, EmptyLadderRunsOnePass) {
+    const std::vector<RpcInfo> views = MakeBaViews(3);
+    const std::vector<RpcAffine> truth = MakeTruthAffines(3);
+    constexpr double kColAmp = 3.0;
+    constexpr double kRowAmp = 2.0;
+    const std::vector<Pt> pts = MakePoints(120, views[0]);
+    std::vector<RpcBaPoint> points;
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        RpcBaPoint pt;
+        for (int v = 0; v < 3; ++v) {
+            double c = 0.0;
+            double r = 0.0;
+            rpc_forward_point(views[static_cast<std::size_t>(v)],
+                              pts[i].lon,
+                              pts[i].lat,
+                              pts[i].alt,
+                              c,
+                              r);
+            truth[static_cast<std::size_t>(v)].Apply(c, r, c, r);
+            c += Field2D(c, r, kColAmp, kRowAmp);
+            r += Field2D(c, r, 0.6 * kColAmp, 0.5 * kRowAmp);
+            pt.measures.push_back(RpcBaMeasure{v, c, r});
+        }
+        points.push_back(pt);
+    }
+    std::vector<RpcAffineGridded> net;
+    for (int s = 0; s < 3; ++s) {
+        net.push_back(
+            *RpcAffineGridded::MakeUniform2D(RpcAffine::Identity(),
+                                             kColLo,
+                                             kColHi,
+                                             kRowLo,
+                                             kRowHi,
+                                             6,
+                                             4,
+                                             RpcAffineGridBasis::Linear));
+    }
+
+    RpcBaRobustOptions options;
+    options.identity_prior_px = 2.0;
+    const RpcBaRobustReport report =
+        solve_rpc_bundle_adjust_robust(views, points, net, options);
+
+    ASSERT_TRUE(report.ok) << report.message;
+    EXPECT_EQ(report.passes.size(), std::size_t{1});
+    EXPECT_EQ(report.num_measures_trimmed, 0);
+    EXPECT_EQ(report.num_points_dropped, 0);
+    EXPECT_LT(report.passes.front().grid_stage.rms_after_px, 0.5);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

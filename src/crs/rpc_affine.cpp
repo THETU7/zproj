@@ -262,18 +262,21 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
         problem.AddResidualBlock(
             MakeReprojCost(
                 left, used[i].left_col, used[i].left_row, options.pixel_sigma),
-            NewLoss(options.robust_threshold_px, options.pixel_sigma),
+            NewLoss(options.loss_kind,
+                    options.robust_threshold_px,
+                    options.pixel_sigma),
             la.data(),
             ground[i].data());
-        problem.AddResidualBlock(
-            MakeReprojCost(right,
-                           used[i].right_col,
-                           used[i].right_row,
-                           options.pixel_sigma,
-                           zero_mean),
-            NewLoss(options.robust_threshold_px, options.pixel_sigma),
-            right_block,
-            ground[i].data());
+        problem.AddResidualBlock(MakeReprojCost(right,
+                                                used[i].right_col,
+                                                used[i].right_row,
+                                                options.pixel_sigma,
+                                                zero_mean),
+                                 NewLoss(options.loss_kind,
+                                         options.robust_threshold_px,
+                                         options.pixel_sigma),
+                                 right_block,
+                                 ground[i].data());
     }
 
     // GCP observations: constant ground blocks (the ground coordinates ARE
@@ -290,7 +293,9 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& left,
             problem.SetParameterBlockConstant(gcp_ground.back().data());
             problem.AddResidualBlock(
                 MakeReprojCost(info, g.col, g.row, options.pixel_sigma, mirror),
-                NewLoss(options.robust_threshold_px, options.pixel_sigma),
+                NewLoss(options.loss_kind,
+                        options.robust_threshold_px,
+                        options.pixel_sigma),
                 aff,
                 gcp_ground.back().data());
         }
@@ -409,7 +414,9 @@ RpcAffineReport solve_rpc_affine(const RpcInfo& info,
         problem.SetParameterBlockConstant(gcp_ground.back().data());
         problem.AddResidualBlock(
             MakeReprojCost(info, g.col, g.row, options.pixel_sigma),
-            NewLoss(options.robust_threshold_px, options.pixel_sigma),
+            NewLoss(options.loss_kind,
+                    options.robust_threshold_px,
+                    options.pixel_sigma),
             a.data(),
             gcp_ground.back().data());
     }
